@@ -67,10 +67,17 @@ class AgentHarness:
             )
             
             resp_data = resp.json()
-            message = resp_data.get("choices", [{}])[0].get("message", {})
             
-            content = message.get("content", "")
-            tool_calls = message.get("tool_calls", [])
+            # Handle both OpenAI format and Prism native format
+            if "choices" in resp_data:
+                message = resp_data.get("choices", [{}])[0].get("message", {})
+                content = message.get("content", "")
+                tool_calls = message.get("tool_calls", [])
+            else:
+                # Prism native format
+                content = resp_data.get("text", "")
+                tool_calls = resp_data.get("toolCalls", [])
+            
             
             # 2. Add LLM response to history
             self.session.add_assistant_message(content, tool_calls)
