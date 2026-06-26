@@ -59,3 +59,37 @@ def audit_html_fragment(html_content: str) -> Dict[str, Any]:
         "errors": parser.errors,
         "tags": list(set(parser.found_tags))
     }
+
+def audit_functional_html(html_str: str) -> dict:
+    """
+    Audits an HTML fragment for dead interactivity (e.g. return false, missing handlers).
+    Returns a dictionary with 'is_valid' and 'errors'.
+    """
+    errors = []
+    
+    if "onclick=\"return false\"" in html_str or "onclick='return false'" in html_str:
+        errors.append("Found dead button (onclick='return false'). You MUST provide a real inline JavaScript function instead of 'return false'.")
+        
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_str, "html.parser")
+        
+        # Check buttons
+        for btn in soup.find_all("button"):
+            if not btn.get("onclick") and not btn.get("id") and not btn.get("class") and not btn.get("type") == "submit":
+                errors.append("Found a <button> with no onclick handler, id, or class. It appears dead.")
+                
+        # Check links
+        for a in soup.find_all("a"):
+            if a.get("href") == "#" and not a.get("onclick"):
+                errors.append("Found a link (<a href='#'>) with no onclick handler. It appears dead.")
+                
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed to audit HTML: {e}")
+        
+    return {
+        "is_valid": len(errors) == 0,
+        "errors": errors
+    }
