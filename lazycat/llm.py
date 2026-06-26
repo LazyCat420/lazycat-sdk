@@ -163,7 +163,7 @@ class PrismClient:
             logger.error(f"Prism call failed: {e}")
             raise
 
-prism_client = PrismClient()
+
     def _get_agent_lock(self, agent_id: str) -> asyncio.Lock:
         if agent_id not in self._custom_agent_locks:
             self._custom_agent_locks[agent_id] = asyncio.Lock()
@@ -253,3 +253,5 @@ prism_client = PrismClient()
 
             self._registered_custom_agents.add(agent_id)
             return agent_id
+
+prism_client = PrismClient()
