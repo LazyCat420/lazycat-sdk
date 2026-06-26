@@ -225,6 +225,7 @@ class PrismClient:
 
             payload = {
                 "name": display_name,
+                "agentId": agent_id,
                 "identity": identity,
                 "guidelines": guidelines,
                 "enabledTools": _filtered_tools,
