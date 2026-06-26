@@ -15,9 +15,10 @@ class ToolExecutor:
     
     @property
     def url(self) -> str:
-        # We assume tool service runs locally on the specified port
+        import os
         port = config.LAZY_TOOL_SERVICE_PORT
-        return f"http://127.0.0.1:{port}"
+        host = os.getenv("LAZY_TOOL_SERVICE_HOST", "127.0.0.1")
+        return f"http://{host}:{port}"
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -34,7 +35,7 @@ class ToolExecutor:
             clean_name = clean_name[len(mcp_prefix):]
             
         client = await self._get_client()
-        target_url = f"{self.url}/v1/tools/{clean_name}"
+        target_url = f"{self.url}/execute/{clean_name}"
         
         payload = {"arguments": arguments}
         
