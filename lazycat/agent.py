@@ -97,3 +97,51 @@ class AgentHarness:
                 
         logger.warning(f"[{self.agent.name}] Reached max iterations ({self.max_iterations})")
         return "Max iterations reached without a final answer."
+
+    async def stream_run(self, payload_override: dict | None = None):
+        """
+        Yields raw Server-Sent Events from Prism. 
+        If payload_override is provided, it passes those parameters to Prism 
+        (useful for MCP tool execution where Prism loops internally).
+        Otherwise it uses the local agent config.
+        """
+        import httpx
+        import json
+        
+        url = f"{self.agent.llm_client.url}/agent"
+        
+        payload = {
+            "provider": self.agent.provider,
+            "model": self.agent.model,
+            "messages": self.session.get_messages(),
+            "maxTokens": 8192,
+            "systemPrompt": self.agent.system_prompt,
+            "agent": self.agent.name,
+            "stream": True
+        }
+        
+        if payload_override:
+            payload.update(payload_override)
+            
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            async with client.stream(
+                "POST", 
+                url, 
+                json=payload, 
+                headers={"Accept": "text/event-stream"}
+            ) as resp:
+                if resp.status_code != 200:
+                    error_body = ""
+                    async for chunk in resp.aiter_text():
+                        error_body += chunk
+                    yield f'data: {json.dumps({"type": "error", "message": f"Prism error {resp.status_code}: {error_body[:500]}"})}\\n\\n'
+                    return
+                
+                buffer = ""
+                async for chunk in resp.aiter_text():
+                    buffer += chunk
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        if line:
+                            yield f"{line}\n\n"
