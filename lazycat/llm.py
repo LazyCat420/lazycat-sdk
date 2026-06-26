@@ -127,7 +127,15 @@ class PrismClient:
         }
 
         if tools:
-            payload["tools"] = tools
+            # Prism expects flat tools (name, description, parameters) 
+            # instead of OpenAI's {"type": "function", "function": {...}} wrapper
+            unwrapped_tools = []
+            for t in tools:
+                if "function" in t:
+                    unwrapped_tools.append(t["function"])
+                else:
+                    unwrapped_tools.append(t)
+            payload["tools"] = unwrapped_tools
 
         if is_new:
             payload["createSession"] = True
