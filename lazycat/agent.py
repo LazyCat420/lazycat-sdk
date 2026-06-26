@@ -41,10 +41,24 @@ class AgentHarness:
     send message -> check for tool calls -> dispatch -> loop until done.
     """
     
-    def __init__(self, agent: BaseAgent, session: ConversationSession):
+    def __init__(
+        self,
+        agent: BaseAgent,
+        session: ConversationSession,
+        max_iterations: int = 15,
+        on_tool_call: Callable[[str, dict], str | None] | None = None,
+        on_tool_result: Callable[[str, dict, Any, bool], None] | None = None,
+    ):
         self.agent = agent
         self.session = session
-        self.max_iterations = 15
+        self.max_iterations = max_iterations
+        # Hook: called before each tool execution with (tool_name, arguments).
+        # Return None to proceed, or a string to inject as the tool result
+        # (e.g. "BLOCKED: tool loop detected") and skip actual execution.
+        self.on_tool_call = on_tool_call
+        # Hook: called after each tool execution with (tool_name, arguments, result, was_blocked).
+        # Use to record tool call outcomes for loop detection.
+        self.on_tool_result = on_tool_result
 
     async def run(self, user_input: str | None = None) -> str:
         """Run the agent loop until it completes or reaches max iterations."""
@@ -98,8 +112,27 @@ class AgentHarness:
                 
                 logger.info(f"[{self.agent.name}] Executing tool: {func_name}")
                 
-                # Execute via the tool service proxy
-                result = await tool_executor.execute_tool(func_name, arguments)
+                # Check hook before execution (e.g. ToolLoopDetector)
+                override_result = None
+                if self.on_tool_call is not None:
+                    override_result = self.on_tool_call(func_name, arguments)
+                
+                if override_result is not None:
+                    # Hook blocked this call — use override as result
+                    logger.warning(f"[{self.agent.name}] Tool call blocked by hook: {func_name}")
+                    result = {"blocked": True, "message": override_result}
+                    was_blocked = True
+                else:
+                    # Execute via the tool service proxy
+                    result = await tool_executor.execute_tool(func_name, arguments)
+                    was_blocked = False
+                
+                # Notify post-call hook (e.g. ToolLoopDetector records outcome)
+                if self.on_tool_result is not None:
+                    try:
+                        self.on_tool_result(func_name, arguments, result, was_blocked)
+                    except Exception as hook_err:
+                        logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
                 
                 # 5. Add result to history
                 self.session.add_tool_message(
