@@ -19,7 +19,7 @@ class Validator:
             raise ValueError(f"Validation failed: {e}")
 
     @staticmethod
-    async def self_review_html(html_content: str, llm_client) -> str:
+    async def self_review_html(html_content: str, llm_client, project: str = "lazycat-sdk-app") -> str:
         """
         Agentic loop to review generated HTML for dead buttons or missing handlers.
         """
@@ -45,7 +45,8 @@ class Validator:
                 system_prompt=system_prompt,
                 agent_name="html_reviewer",
                 max_tokens=4096,
-                temperature=0.1
+                temperature=0.1,
+                project=project
             )
             content = resp.text.strip()
             if content.startswith("```html"):
