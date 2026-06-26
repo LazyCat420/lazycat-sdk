@@ -15,7 +15,7 @@ class BaseAgent:
         self,
         name: str,
         system_prompt: str,
-        model: str = "gpt-4o",
+        model: str = "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit",
         temperature: float = 0.0,
         provider: str = "vllm",
         llm_client: Any = None,
