@@ -96,7 +96,7 @@ class PrismClient:
         tools: list[dict] | None = None,
         max_tokens: int = 8192,
         temperature: float = 0.0,
-        provider: str = "vllm-1",
+        provider: str = "vllm",
         project: str = "default-project",
         username: str = "lazycat-sdk",
         stream: bool = False,

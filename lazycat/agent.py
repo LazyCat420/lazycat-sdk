@@ -11,11 +11,22 @@ logger = logging.getLogger(__name__)
 class BaseAgent:
     """Base class for all LazyCat SDK agents."""
     
-    def __init__(self, name: str, system_prompt: str, model: str = "gpt-4o"):
+    def __init__(
+        self,
+        name: str,
+        system_prompt: str,
+        model: str = "gpt-4o",
+        temperature: float = 0.0,
+        provider: str = "vllm",
+        llm_client: Any = None,
+    ):
         self.name = name
         self.system_prompt = system_prompt
         self.model = model
+        self.temperature = temperature
+        self.provider = provider
         self.tools: list[dict] = []
+        self.llm_client = llm_client or prism_client
         
     def add_tool(self, tool_schema: dict):
         self.tools.append(tool_schema)
@@ -41,7 +52,7 @@ class AgentHarness:
             iterations += 1
             
             # 1. Send messages to LLM
-            resp = await prism_client.call_agent(
+            resp = await self.agent.llm_client.call_agent(
                 model=self.agent.model,
                 messages=self.session.get_messages(),
                 system_prompt=self.agent.system_prompt,
