@@ -77,20 +77,43 @@ class AgentHarness:
                 agent_name=self.agent.name,
                 project=self.agent.project,
                 max_tokens=self.agent.max_tokens,
-                tools=self.agent.tools if self.agent.tools else None
+                tools=self.agent.tools if self.agent.tools else None,
+                stream=True
             )
             
-            resp_data = resp.json()
+            content = ""
+            tool_calls = []
             
-            # Handle both OpenAI format and Prism native format
-            if "choices" in resp_data:
-                message = resp_data.get("choices", [{}])[0].get("message", {})
-                content = message.get("content", "")
-                tool_calls = message.get("tool_calls", [])
-            else:
-                # Prism native format
-                content = resp_data.get("text", "")
-                tool_calls = resp_data.get("toolCalls", [])
+            import json
+            try:
+                async for line in resp.aiter_lines():
+                    line = line.strip()
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        continue
+                    try:
+                        data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                        
+                    event_type = data.get("type")
+                    if event_type == "chunk":
+                        chunk_text = data.get("content", "")
+                        content += chunk_text
+                        print(chunk_text, end="", flush=True)
+                    elif event_type == "tool_calls" or "toolCalls" in data:
+                        tool_calls = data.get("toolCalls", [])
+                    elif event_type == "error":
+                        logger.error(f"Prism stream error: {data.get('message')}")
+                    elif "text" in data and not event_type:
+                        content = data.get("text", content)
+                        tool_calls = data.get("toolCalls", tool_calls)
+                
+                print() # flush newline after stream completes
+            finally:
+                await resp.aclose()
             
             
             # 2. Add LLM response to history
