@@ -17,6 +17,7 @@ class BaseAgent:
         system_prompt: str,
         model: str = "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit",
         temperature: float = 0.0,
+        max_tokens: int = 8192,
         provider: str = "vllm",
         project: str = "lazycat-sdk-app",
         llm_client: Any = None,
@@ -25,6 +26,7 @@ class BaseAgent:
         self.system_prompt = system_prompt
         self.model = model
         self.temperature = temperature
+        self.max_tokens = max_tokens
         self.provider = provider
         self.project = project
         self.tools: list[dict] = []
@@ -60,6 +62,7 @@ class AgentHarness:
                 system_prompt=self.agent.system_prompt,
                 agent_name=self.agent.name,
                 project=self.agent.project,
+                max_tokens=self.agent.max_tokens,
                 tools=self.agent.tools if self.agent.tools else None
             )
             

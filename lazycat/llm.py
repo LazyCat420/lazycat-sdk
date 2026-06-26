@@ -66,7 +66,7 @@ class PrismClient:
 
         if self._client is None or self._client.is_closed:
             limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
-            self._client = httpx.AsyncClient(timeout=120.0, limits=limits)
+            self._client = httpx.AsyncClient(timeout=600.0, limits=limits)
             self._client_loop = current_loop
         return self._client
 
@@ -199,7 +199,7 @@ class PrismClient:
             client = await self._get_client()
             headers = {
                 "Content-Type": "application/json",
-                "x-project": "default-project",
+                "x-project": project,
                 "x-username": "lazycat-sdk",
             }
 
