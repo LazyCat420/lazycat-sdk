@@ -18,6 +18,7 @@ class BaseAgent:
         model: str = "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit",
         temperature: float = 0.0,
         provider: str = "vllm",
+        project: str = "lazycat-sdk-app",
         llm_client: Any = None,
     ):
         self.name = name
@@ -25,6 +26,7 @@ class BaseAgent:
         self.model = model
         self.temperature = temperature
         self.provider = provider
+        self.project = project
         self.tools: list[dict] = []
         self.llm_client = llm_client or prism_client
         
@@ -57,6 +59,7 @@ class AgentHarness:
                 messages=self.session.get_messages(),
                 system_prompt=self.agent.system_prompt,
                 agent_name=self.agent.name,
+                project=self.agent.project,
                 tools=self.agent.tools if self.agent.tools else None
             )
             
