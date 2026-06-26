@@ -164,3 +164,92 @@ class PrismClient:
             raise
 
 prism_client = PrismClient()
+    def _get_agent_lock(self, agent_id: str) -> asyncio.Lock:
+        if agent_id not in self._custom_agent_locks:
+            self._custom_agent_locks[agent_id] = asyncio.Lock()
+        return self._custom_agent_locks[agent_id]
+
+    async def register_or_update_custom_agent(
+        self,
+        name: str,
+        identity: str,
+        guidelines: str = "",
+        enabled_tools: list[str] | None = None,
+        project: str = "vllm-trading-bot",
+    ) -> str:
+        """Register a custom agent in Prism, or update it if it already exists.
+        Returns the custom agent ID (e.g. 'CUSTOM_BEAR_MACRO_SENTIMENT_T2_AGENT').
+        """
+        slug = name.upper().replace(" ", "_").replace("-", "_").strip("_")
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        agent_id = f"CUSTOM_{slug}" if not slug.startswith("CUSTOM_") else slug
+
+        if not hasattr(self, "_registered_custom_agents"):
+            self._registered_custom_agents = set()
+
+        if agent_id in self._registered_custom_agents:
+            return agent_id
+            
+        lock = self._get_agent_lock(agent_id)
+        async with lock:
+            if agent_id in self._registered_custom_agents:
+                return agent_id
+
+            client = await self._get_client()
+            headers = {
+                "Content-Type": "application/json",
+                "x-project": "default-project",
+                "x-username": "lazycat-sdk",
+            }
+
+            agent_db_id = None
+            try:
+                r = await client.get(f"{self.url}/custom-agents", headers=headers, timeout=10.0)
+                r.raise_for_status()
+                existing_agents = r.json()
+                for agent in existing_agents:
+                    if agent.get("agentId") == agent_id:
+                        agent_db_id = agent.get("_id")
+                        break
+            except Exception as e:
+                logger.warning(f"[PRISM] Failed to query existing custom agents: {e}")
+
+            display_name = name.replace("_", " ").title() if "_" in name else name
+
+            _blocked_prism_tools = {"ask_user_question"}
+            _filtered_tools = [
+                t for t in (enabled_tools or [])
+                if t not in _blocked_prism_tools
+            ]
+
+            payload = {
+                "name": display_name,
+                "identity": identity,
+                "guidelines": guidelines,
+                "enabledTools": _filtered_tools,
+                "availableTools": _filtered_tools,
+                "project": project,
+                "usesDirectoryTree": False,
+                "usesCodingGuidelines": False,
+            }
+
+            if agent_db_id:
+                try:
+                    logger.info(f"[PRISM] Updating existing custom agent {agent_id} (db_id: {agent_db_id})")
+                    r = await client.put(f"{self.url}/custom-agents/{agent_db_id}", json=payload, headers=headers, timeout=10.0)
+                    r.raise_for_status()
+                except Exception as e:
+                    logger.error(f"[PRISM] Failed to update custom agent {agent_id}: {e}")
+                    raise
+            else:
+                try:
+                    logger.info(f"[PRISM] Creating new custom agent {agent_id}")
+                    r = await client.post(f"{self.url}/custom-agents", json=payload, headers=headers, timeout=10.0)
+                    r.raise_for_status()
+                except Exception as e:
+                    logger.error(f"[PRISM] Failed to create custom agent {agent_id}: {e}")
+                    raise
+
+            self._registered_custom_agents.add(agent_id)
+            return agent_id
