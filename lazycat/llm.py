@@ -189,7 +189,7 @@ class PrismClient:
                 r.raise_for_status()
                 return r
             else:
-                r = await client.post(url, json=payload, headers=headers, timeout=120.0)
+                r = await client.post(url, json=payload, headers=headers, timeout=600.0)
                 r.raise_for_status()
                 return r
         except Exception as e:
