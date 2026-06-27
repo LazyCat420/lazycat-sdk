@@ -118,7 +118,16 @@ class PrismClient:
             
         client = await self._get_client()
         
-        group_key = f"chat-{agent_name}"
+        session_suffix = ""
+        if messages:
+            # Find the first user message to create a sticky session key unique to this conversation thread
+            first_user_msg = next((m for m in messages if m.get("role") == "user"), None)
+            if first_user_msg and isinstance(first_user_msg.get("content"), str):
+                import hashlib
+                content_hash = hashlib.md5(first_user_msg["content"].encode("utf-8")).hexdigest()[:8]
+                session_suffix = f"-{content_hash}"
+                
+        group_key = f"chat-{agent_name}{session_suffix}"
         session_id, is_new = self._get_or_create_session(group_key)
         
         if group_key not in self._conversations:
