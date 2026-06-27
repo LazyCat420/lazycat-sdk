@@ -92,7 +92,7 @@ class AgentHarness:
                         continue
                     data_str = line[6:].strip()
                     if data_str == "[DONE]":
-                        continue
+                        break
                     try:
                         data = json.loads(data_str)
                     except json.JSONDecodeError:

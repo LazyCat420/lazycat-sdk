@@ -25,6 +25,7 @@ class PrismClient:
         self._url: str | None = None
         self._cycle_generation: int = 0
         self._custom_agent_locks: dict[str, asyncio.Lock] = {}
+        self._kill_switch_armed: bool = False
 
     @property
     def url(self) -> str:
@@ -33,6 +34,16 @@ class PrismClient:
     @url.setter
     def url(self, value: str):
         self._url = value
+
+    def arm_kill_switch(self):
+        """Immediately aborts all active and future LLM requests."""
+        self._kill_switch_armed = True
+        logger.warning("[PrismClient] Kill switch ARMED")
+
+    def reset_kill_switch(self):
+        """Re-enables LLM requests."""
+        self._kill_switch_armed = False
+        logger.info("[PrismClient] Kill switch RESET")
 
     async def check_health(self) -> bool:
         """Dynamically check if Prism is available."""
@@ -102,6 +113,9 @@ class PrismClient:
         stream: bool = False,
     ) -> httpx.Response:
         """Execute a call to Prism's /agent endpoint."""
+        if self._kill_switch_armed:
+            raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
+            
         client = await self._get_client()
         
         group_key = f"chat-{agent_name}"
