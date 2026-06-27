@@ -106,6 +106,7 @@ def get_default_domain_and_labels(tool_name: str) -> tuple[str, list[str]]:
         "run_playwright_script",
         "youtube_test_channel",
         "update_youtube_channel_handle",
+        "youtube_search",
     ]:
         return "Research & Intelligence", ["research", "scraping", "web-search"]
 
