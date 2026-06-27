@@ -268,4 +268,116 @@ class PrismClient:
             self._registered_custom_agents.add(agent_id)
             return agent_id
 
+    def get_stream_payload_and_url(
+        self,
+        model: str,
+        messages: list[dict],
+        max_tokens: int,
+        temperature: float,
+        system_prompt: str,
+        agent_name: str,
+        conversation_id: str,
+        session_id: str,
+        project: str,
+        username: str,
+        is_new: bool,
+        enable_thinking: bool,
+        tools: list[dict] | None = None,
+        is_qwen_model: bool = False,
+        agentic_mode: bool = True,
+        provider: str = "vllm-1",
+    ) -> tuple[dict, str, dict]:
+        """Returns (payload, url, headers) formatted for Prism /agent streaming."""
+        payload: dict[str, Any] = {
+            "provider": provider,
+            "model": model,
+            "messages": messages,
+            "maxTokens": max_tokens,
+            "temperature": temperature,
+            "conversationId": conversation_id,
+            "project": project,
+            "username": username,
+            "agent": agent_name,
+            "functionCallingEnabled": agentic_mode,
+            "agenticLoopEnabled": agentic_mode,
+            "systemPrompt": system_prompt[:15000],
+        }
+        if is_qwen_model:
+            payload["thinkingEnabled"] = enable_thinking
+
+        if tools and agentic_mode:
+            payload["tools"] = tools
+
+        if is_new:
+            payload["createSession"] = True
+        elif session_id:
+            payload["sessionId"] = session_id
+
+        # target url for stream
+        target_url = f"{self.url}/agent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-project": project,
+            "x-username": username,
+        }
+
+        return payload, target_url, headers
+
+    async def agent_chat_stream(
+        self,
+        model: str,
+        messages: list[dict],
+        max_tokens: int,
+        temperature: float,
+        system_prompt: str,
+        agent_name: str,
+        project: str = "",
+        username: str = "agent_runner",
+        enable_thinking: bool = False,
+        tools: list[dict] | None = None,
+        is_qwen_model: bool = False,
+        agentic_mode: bool = True,
+        agentContext: dict | None = None,
+        provider: str = "vllm-1",
+    ):
+        """High-level wrapper to stream Prism /agent response."""
+        if self._kill_switch_armed:
+            raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
+
+        group_key = f"chat-{agent_name}" if agent_name == "user_chat" else agent_name
+        session_id, is_new = self._get_or_create_session(group_key)
+        conversation_id = str(uuid.uuid4())
+
+        payload, url, headers = self.get_stream_payload_and_url(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_prompt=system_prompt,
+            agent_name=agent_name,
+            conversation_id=conversation_id,
+            session_id=session_id,
+            project=project or config.PROJECT_NAME,
+            username=username,
+            is_new=is_new,
+            enable_thinking=enable_thinking,
+            tools=tools,
+            is_qwen_model=is_qwen_model,
+            agentic_mode=agentic_mode,
+            provider=provider,
+        )
+        if agentContext:
+            payload["agentContext"] = agentContext
+
+        client = await self._get_client()
+        try:
+            async with client.stream("POST", url, json=payload, headers=headers, timeout=180.0) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line:
+                        yield line
+        except Exception as e:
+            logger.error("[PRISM] Error in agent_chat_stream: %s", e)
+            raise
+
 prism_client = PrismClient()
