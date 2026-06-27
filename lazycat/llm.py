@@ -125,10 +125,18 @@ class PrismClient:
             self._conversations[group_key] = str(uuid.uuid4())
         conversation_id = self._conversations[group_key]
 
+        # Prepend system prompt and dummy user message to align system message rewrite in prism-service.
+        # This prevents double system prompt errors on Qwen/vLLM.
+        new_messages = list(messages)
+        if system_prompt and not any(m.get("role") == "system" for m in new_messages):
+            new_messages.insert(0, {"role": "system", "content": system_prompt})
+            if len(new_messages) > 1 and new_messages[1].get("role") == "user":
+                new_messages.insert(1, {"role": "user", "content": "Acknowledged. I am ready to process the quantitative data."})
+
         payload = {
             "provider": provider,
             "model": model,
-            "messages": messages,
+            "messages": new_messages,
             "maxTokens": max_tokens,
             "temperature": temperature,
             "conversationId": conversation_id,
