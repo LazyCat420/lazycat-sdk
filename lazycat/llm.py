@@ -123,19 +123,18 @@ class PrismClient:
             "username": username,
             "agent": agent_name,
             "systemPrompt": system_prompt[:15000],
-            "functionCallingEnabled": bool(tools),
+            "functionCallingEnabled": False,
+            "autoApprove": True,
         }
 
         if tools:
-            # Prism expects flat tools (name, description, parameters) 
-            # instead of OpenAI's {"type": "function", "function": {...}} wrapper
-            unwrapped_tools = []
+            enabled_tools = []
             for t in tools:
                 if "function" in t:
-                    unwrapped_tools.append(t["function"])
-                else:
-                    unwrapped_tools.append(t)
-            payload["tools"] = unwrapped_tools
+                    enabled_tools.append(t["function"]["name"])
+                elif "name" in t:
+                    enabled_tools.append(t["name"])
+            payload["enabledTools"] = enabled_tools
 
         if is_new:
             payload["createSession"] = True
