@@ -28,9 +28,13 @@ async def test_prism_client_sends_correct_shape():
         
         payload = kwargs["json"]
         assert payload["model"] == "test-model"
-        assert payload["messages"] == [{"role": "user", "content": "hello"}]
+        assert payload["messages"] == [
+            {"role": "system", "content": "system test"},
+            {"role": "user", "content": "Acknowledged. I am ready to process the quantitative data."},
+            {"role": "user", "content": "hello"}
+        ]
         assert payload["systemPrompt"] == "system test"
         assert payload["agent"] == "test_agent"
-        assert payload["functionCallingEnabled"] is True
-        assert len(payload["tools"]) == 1
-        assert payload["tools"][0]["function"]["name"] == "test_tool"
+        assert payload["functionCallingEnabled"] is False
+        assert len(payload["enabledTools"]) == 1
+        assert payload["enabledTools"][0] == "test_tool"

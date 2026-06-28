@@ -166,6 +166,29 @@ class ToolRegistry:
         self.schemas: list[dict] = []
         self._meta: dict[str, ToolMeta] = {}
 
+    def load_from_json(self, filepath: str):
+        """Load schemas from a pre-compiled JSON file (e.g. tool_schemas.json)."""
+        import os
+        if not os.path.exists(filepath):
+            logger.warning(f"[ToolRegistry] Schema file not found: {filepath}")
+            return
+            
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                self.schemas.extend(data)
+                for s in data:
+                    name = s.get("function", {}).get("name")
+                    if name and name not in self.tools:
+                        self.tools[name] = None
+            elif isinstance(data, dict) and "schemas" in data:
+                self.schemas.extend(data["schemas"])
+                for s in data["schemas"]:
+                    name = s.get("function", {}).get("name")
+                    if name and name not in self.tools:
+                        self.tools[name] = None
+        logger.info(f"[ToolRegistry] Loaded {len(self.schemas)} schemas from {filepath}")
+
     def register(
         self,
         func: Callable | None = None,
@@ -642,6 +665,12 @@ class ToolRegistry:
     ) -> None:
         """Log a tool usage event."""
         import os
+        if getattr(self, "_telemetry_callback", None):
+            try:
+                self._telemetry_callback(tool_name, agent_name, success, execution_ms, error_message)
+            except Exception as e:
+                logger.debug(f"[ToolRegistry] Telemetry callback failed: {e}")
+                
         if os.environ.get("SKIP_TOOL_USAGE_LOG", "false").lower() == "true":
             return
 
@@ -680,6 +709,10 @@ class ToolRegistry:
                 }
             )
         return snapshot
+
+    def set_telemetry_callback(self, callback: Callable):
+        """Set a callback function for tool telemetry (e.g. database logging)."""
+        self._telemetry_callback = callback
 
 
 registry = ToolRegistry()

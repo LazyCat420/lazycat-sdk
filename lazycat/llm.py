@@ -7,8 +7,88 @@ import httpx
 from httpx import RequestError, HTTPStatusError
 
 from lazycat.config import config
+import json
 
 logger = logging.getLogger(__name__)
+
+class LLMStreamWrapper:
+    def __init__(self, response: httpx.Response, is_openai: bool = False):
+        self.response = response
+        self.is_openai = is_openai
+        
+    async def aiter_lines(self):
+        if not self.is_openai:
+            async for line in self.response.aiter_lines():
+                yield line
+            return
+            
+        buffer = ""
+        async for chunk in self.response.aiter_text():
+            buffer += chunk
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                if line == "data: [DONE]":
+                    yield "data: [DONE]"
+                    break
+                if not line.startswith("data: "):
+                    continue
+                
+                try:
+                    data = json.loads(line[6:])
+                    choices = data.get("choices", [])
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta", {})
+                    
+                    if "content" in delta and delta["content"]:
+                        prism_data = {"type": "chunk", "content": delta["content"]}
+                        yield f"data: {json.dumps(prism_data)}"
+                        
+                    if "tool_calls" in delta and delta["tool_calls"]:
+                        # OpenAI function format to Prism format:
+                        # OpenAI: [{"function": {"name": ..., "arguments": ...}}]
+                        # Prism: [{"id": ..., "function": {"name": ..., "arguments": ...}}]
+                        tool_calls = []
+                        for tc in delta["tool_calls"]:
+                            tool_calls.append({
+                                "id": tc.get("id", ""),
+                                "function": {
+                                    "name": tc.get("function", {}).get("name", ""),
+                                    "arguments": tc.get("function", {}).get("arguments", "{}")
+                                }
+                            })
+                        prism_data = {"toolCalls": tool_calls}
+                        yield f"data: {json.dumps(prism_data)}"
+                except Exception as e:
+                    logger.debug("Failed decoding openai stream line: %s", e)
+                    continue
+                    
+    async def aclose(self):
+        await self.response.aclose()
+
+
+class LLMResponseWrapper:
+    def __init__(self, text: str, tool_calls: list | None = None):
+        self._text = text
+        self._tool_calls = tool_calls or []
+        
+    def json(self):
+        return {
+            "text": self._text,
+            "toolCalls": self._tool_calls
+        }
+        
+    @property
+    def text(self):
+        return self._text
+        
+    async def aclose(self):
+        pass
+
 
 class PrismClient:
     """
@@ -112,11 +192,22 @@ class PrismClient:
         username: str = "lazycat-sdk",
         stream: bool = False,
         max_iterations: int | None = None,
-    ) -> httpx.Response:
-        """Execute a call to Prism's /agent endpoint."""
+    ) -> Any:
+        """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled."""
         if self._kill_switch_armed:
             raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
             
+        if not config.PRISM_ENABLED:
+            return await self._call_vllm_direct(
+                model=model,
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=stream
+            )
+
         client = await self._get_client()
         
         session_suffix = ""
@@ -187,7 +278,7 @@ class PrismClient:
                 req = client.build_request("POST", url, json=payload, headers=headers)
                 r = await client.send(req, stream=True)
                 r.raise_for_status()
-                return r
+                return LLMStreamWrapper(r, is_openai=False)
             else:
                 r = await client.post(url, json=payload, headers=headers, timeout=600.0)
                 r.raise_for_status()
@@ -196,6 +287,90 @@ class PrismClient:
             logger.error(f"Prism call failed: {e}")
             raise
 
+    async def _call_vllm_direct(
+        self,
+        model: str,
+        messages: list[dict],
+        system_prompt: str,
+        tools: list[dict] | None = None,
+        max_tokens: int = 8192,
+        temperature: float = 0.0,
+        stream: bool = False,
+    ) -> Any:
+        client = await self._get_client()
+        
+        is_qwen = "qwen" in model.lower()
+        vllm_base = config.JETSON_VLLM_URL if is_qwen else config.DGX_SPARK_VLLM_URL
+        url = f"{vllm_base}/v1/chat/completions"
+        
+        openai_messages = []
+        if system_prompt:
+            openai_messages.append({"role": "system", "content": system_prompt})
+            
+        for m in messages:
+            if m.get("role") != "system":
+                openai_messages.append({
+                    "role": m.get("role"),
+                    "content": m.get("content") or ""
+                })
+                
+        payload = {
+            "model": model,
+            "messages": openai_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": stream,
+        }
+        
+        if tools:
+            openai_tools = []
+            for t in tools:
+                if "function" in t:
+                    openai_tools.append(t)
+                elif "name" in t:
+                    openai_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": t.get("name"),
+                            "description": t.get("description", ""),
+                            "parameters": t.get("parameters", {"type": "object", "properties": {}, "required": []})
+                        }
+                    })
+            if openai_tools:
+                payload["tools"] = openai_tools
+                payload["tool_choice"] = "auto"
+                
+        headers = {"Content-Type": "application/json"}
+        logger.info(f"[SDK direct-vLLM] completions endpoint: {url} (stream={stream})")
+        
+        try:
+            if stream:
+                req = client.build_request("POST", url, json=payload, headers=headers)
+                r = await client.send(req, stream=True)
+                r.raise_for_status()
+                return LLMStreamWrapper(r, is_openai=True)
+            else:
+                r = await client.post(url, json=payload, headers=headers, timeout=600.0)
+                r.raise_for_status()
+                res_data = r.json()
+                choice = res_data["choices"][0]
+                msg = choice.get("message", {})
+                text = msg.get("content") or ""
+                
+                tool_calls = []
+                if "tool_calls" in msg and msg["tool_calls"]:
+                    for tc in msg["tool_calls"]:
+                        tool_calls.append({
+                            "id": tc.get("id", ""),
+                            "function": {
+                                "name": tc.get("function", {}).get("name", ""),
+                                "arguments": tc.get("function", {}).get("arguments", "{}")
+                            }
+                        })
+                return LLMResponseWrapper(text, tool_calls)
+        except Exception as e:
+            logger.error(f"[SDK direct-vLLM] completions failed: {e}")
+            raise
 
     def _get_agent_lock(self, agent_id: str) -> asyncio.Lock:
         if agent_id not in self._custom_agent_locks:

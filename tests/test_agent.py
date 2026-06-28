@@ -12,14 +12,13 @@ async def test_agent_harness_terminates_cleanly():
     
     # Mock the LLM call to return a text response with NO tool calls
     mock_resp = MagicMock()
-    mock_resp.json.return_value = {
-        "choices": [{
-            "message": {
-                "content": "I am done.",
-                "tool_calls": []
-            }
-        }]
-    }
+    mock_resp.aclose = AsyncMock()
+    
+    async def mock_aiter_lines():
+        yield "data: {\"type\": \"chunk\", \"content\": \"I am done.\"}"
+        yield "data: [DONE]"
+    
+    mock_resp.aiter_lines = mock_aiter_lines
     
     with patch("lazycat.agent.prism_client.call_agent", new_callable=AsyncMock) as mock_call:
         mock_call.return_value = mock_resp

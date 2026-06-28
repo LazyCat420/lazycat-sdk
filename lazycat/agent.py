@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from typing import Any, Callable
@@ -7,6 +8,84 @@ from lazycat.tools import tool_executor
 from lazycat.session import ConversationSession
 
 logger = logging.getLogger(__name__)
+
+class ToolLoopDetector:
+    """Detects and breaks tool call loops.
+
+    Tracks (tool_name, args_hash, status) history per session.
+    If the same combo fails N times, returns a stop injection message
+    instructing the agent to reason from what it already has.
+    """
+
+    def __init__(self, max_identical_failures: int = 3, max_duplicate_queries: int = 2):
+        self.max_identical_failures = max_identical_failures
+        self.max_duplicate_queries = max_duplicate_queries
+        self._history: dict[str, int] = {}  # "tool:args_hash:failed" -> count
+        self._warning_issued: set[str] = set()  # keys that got a warning injection
+        self.escalation_triggered: bool = False  # True = agent persisted after warning
+
+    def _make_key(self, tool_name: str, args: Any, failed: bool) -> str:
+        """Create a dedup key from tool name, args hash, and failure status."""
+        args_str = json.dumps(args, sort_keys=True, default=str) if args else ""
+        args_hash = hashlib.sha256(args_str.encode()).hexdigest()[:12]
+        status = "failed" if failed else "ok"
+        return f"{tool_name}:{args_hash}:{status}"
+
+    def record_call(
+        self, tool_name: str, args: Any, failed: bool
+    ) -> str | None:
+        """Record a tool call and check for loops.
+
+        Returns:
+            A stop injection message if a loop is detected, else None.
+        """
+        key = self._make_key(tool_name, args, failed)
+        self._history[key] = self._history.get(key, 0) + 1
+
+        # ── Failure loop detection ──
+        if failed and self._history[key] >= self.max_identical_failures:
+            if key in self._warning_issued:
+                self.escalation_triggered = True
+                logger.error(
+                    "[ToolLoopDetector] ESCALATION: %s persisted after warning (%d failures).",
+                    tool_name, self._history[key],
+                )
+                return (
+                    f"[SYSTEM OVERRIDE — ESCALATION] The tool '{tool_name}' has now failed "
+                    f"{self._history[key]} times. The previous warning was ignored. "
+                    f"You MUST stop calling this tool immediately and produce your "
+                    f"final artifact with the data you have. Mark missing data as "
+                    f"'DataGap: [description]'."
+                )
+
+            self._warning_issued.add(key)
+            logger.warning(
+                "[ToolLoopDetector] Loop detected: %s failed %d times with same args",
+                tool_name,
+                self._history[key],
+            )
+            return (
+                f"[SYSTEM OVERRIDE] The tool '{tool_name}' has failed "
+                f"{self._history[key]} times with the same arguments. "
+                f"STOP calling this tool. Instead, reason from the data you "
+                f"already have and produce your final artifact. If critical "
+                f"data is missing, mark it as 'DataGap: [description]' in "
+                f"your output."
+            )
+
+        # ── Duplicate query detection (successful calls) ──
+        if not failed and self._history[key] > self.max_duplicate_queries:
+            logger.warning(
+                "[ToolLoopDetector] Duplicate query: %s called %d times with same args (successful)",
+                tool_name, self._history[key],
+            )
+            return (
+                f"[SYSTEM NOTICE] You have already called '{tool_name}' with these "
+                f"exact arguments {self._history[key]} times and received the same data. "
+                f"Use the data you already have — do not re-request it."
+            )
+
+        return None
 
 class BaseAgent:
     """Base class for all LazyCat SDK agents."""
@@ -54,11 +133,10 @@ class AgentHarness:
         self.max_iterations = max_iterations
         # Hook: called before each tool execution with (tool_name, arguments).
         # Return None to proceed, or a string to inject as the tool result
-        # (e.g. "BLOCKED: tool loop detected") and skip actual execution.
         self.on_tool_call = on_tool_call
         # Hook: called after each tool execution with (tool_name, arguments, result, was_blocked).
-        # Use to record tool call outcomes for loop detection.
         self.on_tool_result = on_tool_result
+        self.loop_detector = ToolLoopDetector(max_identical_failures=3)
 
     async def run(self, user_input: str | None = None) -> str:
         """Run the agent loop until it completes or reaches max iterations."""
@@ -135,20 +213,40 @@ class AgentHarness:
                 
                 logger.info(f"[{self.agent.name}] Executing tool: {func_name}")
                 
-                # Check hook before execution (e.g. ToolLoopDetector)
-                override_result = None
-                if self.on_tool_call is not None:
+                # Internal loop detection
+                loop_block_msg = self.loop_detector.record_call(func_name, arguments, failed=True)
+                if loop_block_msg:
+                    override_result = loop_block_msg
+                else:
+                    # Undo the speculative failure record
+                    key = self.loop_detector._make_key(func_name, arguments, failed=True)
+                    self.loop_detector._history[key] = max(0, self.loop_detector._history.get(key, 1) - 1)
+                
+                # External Hook
+                if override_result is None and self.on_tool_call is not None:
                     override_result = self.on_tool_call(func_name, arguments)
                 
                 if override_result is not None:
                     # Hook blocked this call — use override as result
-                    logger.warning(f"[{self.agent.name}] Tool call blocked by hook: {func_name}")
+                    logger.warning(f"[{self.agent.name}] Tool call blocked: {func_name}")
                     result = {"blocked": True, "message": override_result}
                     was_blocked = True
                 else:
                     # Execute via the tool service proxy
                     result = await tool_executor.execute_tool(func_name, arguments)
                     was_blocked = False
+                    
+                    # Record actual outcome
+                    failed = False
+                    if isinstance(result, dict):
+                        if result.get("error") or result.get("is_error"):
+                            failed = True
+                        elif not result:
+                            failed = True
+                    elif result is None:
+                        failed = True
+                    
+                    self.loop_detector.record_call(func_name, arguments, failed=failed)
                 
                 # Notify post-call hook (e.g. ToolLoopDetector records outcome)
                 if self.on_tool_result is not None:
