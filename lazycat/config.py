@@ -17,11 +17,11 @@ class Config:
 
     @property
     def LAZY_TOOL_SERVICE_PORT(self):
-        return get_env_or_raise("LAZY_TOOL_SERVICE_PORT")
+        return os.getenv("LAZY_TOOL_SERVICE_PORT", "5591")
 
     @property
     def PRISM_SERVICE_PORT(self):
-        return get_env_or_raise("PRISM_SERVICE_PORT")
+        return os.getenv("PRISM_SERVICE_PORT", "7778")
 
     @property
     def PRISM_ENABLED(self) -> bool:
