@@ -16,6 +16,9 @@ class ToolExecutor:
     @property
     def url(self) -> str:
         import os
+        env_url = os.getenv("LAZY_TOOL_SERVICE_URL")
+        if env_url:
+            return env_url
         port = config.LAZY_TOOL_SERVICE_PORT
         host = os.getenv("LAZY_TOOL_SERVICE_HOST", "127.0.0.1")
         return f"http://{host}:{port}"
