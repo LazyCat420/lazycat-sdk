@@ -175,18 +175,56 @@ class ToolRegistry:
             
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
+            
+            raw_list = []
             if isinstance(data, list):
-                self.schemas.extend(data)
-                for s in data:
-                    name = s.get("function", {}).get("name")
-                    if name and name not in self.tools:
-                        self.tools[name] = None
+                raw_list = data
             elif isinstance(data, dict) and "schemas" in data:
-                self.schemas.extend(data["schemas"])
-                for s in data["schemas"]:
-                    name = s.get("function", {}).get("name")
-                    if name and name not in self.tools:
+                raw_list = data["schemas"]
+
+            normalized_schemas = []
+            for s in raw_list:
+                if "function" in s:
+                    normalized = s
+                    func_info = s["function"]
+                    name = func_info.get("name")
+                else:
+                    name = s.get("name")
+                    func_info = {
+                        "name": name,
+                        "description": s.get("description", ""),
+                        "parameters": s.get("parameters", {})
+                    }
+                    normalized = {
+                        "type": "function",
+                        "function": func_info
+                    }
+                
+                normalized_schemas.append(normalized)
+                
+                if name:
+                    if name not in self.tools:
                         self.tools[name] = None
+                    
+                    perm_str = s.get("permission", "read_only")
+                    try:
+                        perm = PermissionLevel(perm_str)
+                    except ValueError:
+                        perm = PermissionLevel.READ_ONLY
+                        
+                    self._meta[name] = ToolMeta(
+                        tier=s.get("tier", 0),
+                        source=s.get("source", ""),
+                        fallback_only=s.get("fallback_only", False),
+                        permission=perm,
+                        max_result_chars=s.get("max_result_chars", 50000),
+                        concurrency_safe=s.get("concurrency_safe", True),
+                        tags=s.get("tags", []),
+                        domain=s.get("domain"),
+                        labels=s.get("labels", []),
+                    )
+            
+            self.schemas.extend(normalized_schemas)
         logger.info(f"[ToolRegistry] Loaded {len(self.schemas)} schemas from {filepath}")
 
     def register(

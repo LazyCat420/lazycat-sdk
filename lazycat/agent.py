@@ -204,52 +204,66 @@ class AgentHarness:
             # 4. Dispatch tool calls
             for tc in tool_calls:
                 tc_id = tc.get("id", "")
-                func = tc.get("function", {})
-                func_name = func.get("name", "")
-                try:
-                    arguments = json.loads(func.get("arguments", "{}"))
-                except json.JSONDecodeError:
-                    arguments = {}
+                if "function" in tc:
+                    func = tc.get("function", {})
+                    func_name = func.get("name", "")
+                    try:
+                        arguments = json.loads(func.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        arguments = {}
+                else:
+                    func_name = tc.get("name", "")
+                    arguments = tc.get("arguments") or tc.get("args") or {}
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            arguments = {}
                 
                 logger.info(f"[{self.agent.name}] Executing tool: {func_name}")
                 
-                # Internal loop detection
-                loop_block_msg = self.loop_detector.record_call(func_name, arguments, failed=True)
-                if loop_block_msg:
-                    override_result = loop_block_msg
-                else:
-                    # Undo the speculative failure record
-                    key = self.loop_detector._make_key(func_name, arguments, failed=True)
-                    self.loop_detector._history[key] = max(0, self.loop_detector._history.get(key, 1) - 1)
-                
-                # External Hook
-                if override_result is None and self.on_tool_call is not None:
-                    override_result = self.on_tool_call(func_name, arguments)
-                
-                if override_result is not None:
-                    # Hook blocked this call — use override as result
-                    logger.warning(f"[{self.agent.name}] Tool call blocked: {func_name}")
-                    result = {"blocked": True, "message": override_result}
-                    was_blocked = True
-                else:
-                    # Execute via the tool service proxy
-                    result = await tool_executor.execute_tool(func_name, arguments)
+                # Check for human-in-the-loop pauses
+                if func_name in ("ask_user_question", "request_plan_approval"):
+                    result = await self._handle_pausing_tool(func_name, arguments)
                     was_blocked = False
+                else:
+                    # Internal loop detection
+                    loop_block_msg = self.loop_detector.record_call(func_name, arguments, failed=True)
+                    if loop_block_msg:
+                        override_result = loop_block_msg
+                    else:
+                        # Undo the speculative failure record
+                        key = self.loop_detector._make_key(func_name, arguments, failed=True)
+                        self.loop_detector._history[key] = max(0, self.loop_detector._history.get(key, 1) - 1)
                     
-                    # Record actual outcome
-                    failed = False
-                    if isinstance(result, dict):
-                        if result.get("error") or result.get("is_error"):
-                            failed = True
-                        elif not result:
-                            failed = True
-                    elif result is None:
-                        failed = True
+                    # External Hook
+                    if override_result is None and self.on_tool_call is not None:
+                        override_result = self.on_tool_call(func_name, arguments)
                     
-                    self.loop_detector.record_call(func_name, arguments, failed=failed)
+                    if override_result is not None:
+                        # Hook blocked this call — use override as result
+                        logger.warning(f"[{self.agent.name}] Tool call blocked: {func_name}")
+                        result = {"blocked": True, "message": override_result}
+                        was_blocked = True
+                    else:
+                        # Execute via the tool service proxy
+                        result = await tool_executor.execute_tool(func_name, arguments)
+                        was_blocked = False
+                        
+                        # Record actual outcome
+                        failed = False
+                        if isinstance(result, dict):
+                            if result.get("error") or result.get("is_error"):
+                                failed = True
+                            elif not result:
+                                failed = True
+                        elif result is None:
+                            failed = True
+                        
+                        self.loop_detector.record_call(func_name, arguments, failed=failed)
                 
                 # Notify post-call hook (e.g. ToolLoopDetector records outcome)
-                if self.on_tool_result is not None:
+                if self.on_tool_result is not None and func_name not in ("ask_user_question", "request_plan_approval"):
                     try:
                         self.on_tool_result(func_name, arguments, result, was_blocked)
                     except Exception as hook_err:
@@ -264,6 +278,57 @@ class AgentHarness:
                 
         logger.warning(f"[{self.agent.name}] Reached max iterations ({self.max_iterations})")
         return "Max iterations reached without a final answer."
+
+    async def _handle_pausing_tool(self, func_name: str, arguments: dict) -> Any:
+        import os
+        import time
+        import json
+        import asyncio
+        
+        session_id = self.session.session_id
+        if not session_id:
+            session_id = f"session-{int(time.time())}"
+            
+        # Emit SSE status event to stdout for Express to forward to SSE client
+        if func_name == "ask_user_question":
+            question_text = arguments.get("question") or arguments.get("prompt") or ""
+            choices = arguments.get("choices", [])
+            print(f'data: {json.dumps({"type": "question", "question": question_text, "choices": choices})}', flush=True)
+        else: # request_plan_approval
+            plan_text = arguments.get("plan") or arguments.get("details") or ""
+            print(f'data: {json.dumps({"type": "approval_required", "plan": plan_text})}', flush=True)
+            
+        # Poll file system for response file
+        pause_file = os.path.join("data", "pauses", f"{session_id}.json")
+        
+        # Max wait: 10 minutes (600 seconds)
+        max_wait = 600
+        elapsed = 0
+        while elapsed < max_wait:
+            if os.path.exists(pause_file):
+                try:
+                    # Give a tiny buffer for file system synchronization
+                    await asyncio.sleep(0.1)
+                    with open(pause_file, "r") as f:
+                        data = json.load(f)
+                    
+                    # Clean up file
+                    try:
+                        os.remove(pause_file)
+                    except Exception:
+                        pass
+                    
+                    if func_name == "ask_user_question":
+                        return {"answers": data.get("answers") or [{"answer": data.get("answer", "")}]}
+                    else: # request_plan_approval
+                        return {"approved": data.get("approved", True)}
+                except Exception as e:
+                    logger.error("Failed to read pause file: %s", e)
+                    
+            await asyncio.sleep(1.0)
+            elapsed += 1
+            
+        return {"error": "Timeout waiting for user response"}
 
     async def stream_run(self, payload_override: dict | None = None):
         """
