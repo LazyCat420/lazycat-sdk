@@ -566,7 +566,7 @@ class PrismClient:
 
         client = await self._get_client()
         try:
-            async with client.stream("POST", url, json=payload, headers=headers, timeout=180.0) as response:
+            async with client.stream("POST", url, json=payload, headers=headers, timeout=600.0) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if line:
