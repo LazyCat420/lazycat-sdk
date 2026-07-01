@@ -48,13 +48,10 @@ class ToolExecutor:
         for attempt in range(max_retries):
             try:
                 r = await client.post(target_url, json=payload)
-                # Parse JSON response
                 if r.status_code == 200:
                     return r.json()
-                elif r.status_code >= 500:
-                    r.raise_for_status()
                 else:
-                    return {"error": f"Tool service error {r.status_code}: {r.text}"}
+                    return {"error": f"lazy-tool-service returned status code {r.status_code}: {r.text}"}
             except httpx.RequestError as e:
                 if attempt == max_retries - 1:
                     return {"error": f"Tool service request failed: {str(e)}"}
