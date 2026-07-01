@@ -192,6 +192,7 @@ class PrismClient:
         username: str = "lazycat-sdk",
         stream: bool = False,
         max_iterations: int | None = None,
+        session_id: str | None = None,
     ) -> Any:
         """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled."""
         if self._kill_switch_armed:
@@ -211,7 +212,9 @@ class PrismClient:
         client = await self._get_client()
         
         session_suffix = ""
-        if messages:
+        if session_id:
+            session_suffix = f"-{session_id[-8:]}"
+        elif messages:
             # Find the first user message to create a sticky session key unique to this conversation thread
             first_user_msg = next((m for m in messages if m.get("role") == "user"), None)
             if first_user_msg and isinstance(first_user_msg.get("content"), str):
