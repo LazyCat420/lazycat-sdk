@@ -654,12 +654,22 @@ class ToolRegistry:
         # ── Execute ──
         t0 = time.monotonic()
         try:
-            service_source = "lazy-tool-service"
-            func = self.tools[func_name]
-            if inspect.iscoroutinefunction(func):
-                result = await func(**kwargs)
+            import os
+            use_lazy = os.getenv("USE_LAZY_TOOL_SERVICE", "false").lower() == "true"
+            if use_lazy:
+                from lazycat.tools import tool_executor
+                resp_json = await tool_executor.execute_tool(func_name, kwargs)
+                if "error" in resp_json:
+                    raise RuntimeError(resp_json["error"])
+                result = resp_json.get("content", "")
+                service_source = "lazy-tool-service"
             else:
-                result = func(**kwargs)
+                service_source = "trading-service"
+                func = self.tools[func_name]
+                if inspect.iscoroutinefunction(func):
+                    result = await func(**kwargs)
+                else:
+                    result = func(**kwargs)
 
             if not isinstance(result, str):
                 result = json.dumps(result)
