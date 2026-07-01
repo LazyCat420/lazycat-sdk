@@ -156,6 +156,7 @@ class AgentHarness:
                 project=self.agent.project,
                 max_tokens=self.agent.max_tokens,
                 tools=self.agent.tools if self.agent.tools else None,
+                provider=self.agent.provider,
                 stream=True
             )
             
