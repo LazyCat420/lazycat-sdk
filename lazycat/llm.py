@@ -118,6 +118,13 @@ class PrismClient:
     def arm_kill_switch(self):
         """Immediately aborts all active and future LLM requests."""
         self._kill_switch_armed = True
+        if self._client is not None and not self._client.is_closed:
+            try:
+                import asyncio
+                asyncio.create_task(self._client.aclose())
+            except Exception as e:
+                logger.warning(f"[PrismClient] Failed to schedule client close: {e}")
+            self._client = None
         logger.warning("[PrismClient] Kill switch ARMED")
 
     def reset_kill_switch(self):
@@ -483,13 +490,21 @@ class PrismClient:
         tools: list[dict] | None = None,
         is_qwen_model: bool = False,
         agentic_mode: bool = True,
-        provider: str = "vllm-1",
+        provider: str = "vllm",
     ) -> tuple[dict, str, dict]:
         """Returns (payload, url, headers) formatted for Prism /agent streaming."""
+        # Prepend system prompt and dummy user message to align system message rewrite in prism-service.
+        # This prevents double system prompt errors on Qwen/vLLM.
+        new_messages = list(messages)
+        if system_prompt and not any(m.get("role") == "system" for m in new_messages):
+            new_messages.insert(0, {"role": "system", "content": system_prompt})
+            if len(new_messages) > 1 and new_messages[1].get("role") == "user":
+                new_messages.insert(1, {"role": "user", "content": "Acknowledged. I am ready to process the quantitative data."})
+
         payload: dict[str, Any] = {
             "provider": provider,
             "model": model,
-            "messages": messages,
+            "messages": new_messages,
             "maxTokens": max_tokens,
             "temperature": temperature,
             "conversationId": conversation_id,
@@ -504,7 +519,16 @@ class PrismClient:
             payload["thinkingEnabled"] = enable_thinking
 
         if tools and agentic_mode:
-            payload["tools"] = tools
+            enabled_tools = []
+            for t in tools:
+                if isinstance(t, dict):
+                    if "function" in t:
+                        enabled_tools.append(t["function"]["name"])
+                    elif "name" in t:
+                        enabled_tools.append(t["name"])
+                elif isinstance(t, str):
+                    enabled_tools.append(t)
+            payload["enabledTools"] = enabled_tools
 
         if is_new:
             payload["createSession"] = True
@@ -512,7 +536,7 @@ class PrismClient:
             payload["sessionId"] = session_id
 
         # target url for stream
-        target_url = f"{self.url}/agent"
+        target_url = f"{self.url}/agent?stream=true"
         headers = {
             "Content-Type": "application/json",
             "x-project": project,
@@ -536,7 +560,7 @@ class PrismClient:
         is_qwen_model: bool = False,
         agentic_mode: bool = True,
         agentContext: dict | None = None,
-        provider: str = "vllm-1",
+        provider: str = "vllm",
     ):
         """High-level wrapper to stream Prism /agent response."""
         if self._kill_switch_armed:
