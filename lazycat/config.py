@@ -21,7 +21,7 @@ class Config:
 
     @property
     def PRISM_SERVICE_PORT(self):
-        return os.getenv("PRISM_SERVICE_PORT", "7778")
+        return os.getenv("PRISM_SERVICE_PORT", "7777")
 
     @property
     def PRISM_ENABLED(self) -> bool:
