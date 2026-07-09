@@ -9,11 +9,11 @@ def get_env_or_raise(key: str) -> str:
 class Config:
     @property
     def PRISM_URL(self):
-        return get_env_or_raise("PRISM_URL")
+        return os.getenv("PRISM_URL", "http://10.0.0.16:7777")
 
     @property
     def VAULT_SERVICE_URL(self):
-        return get_env_or_raise("VAULT_SERVICE_URL")
+        return os.getenv("VAULT_SERVICE_URL", "http://10.0.0.16:5599")
 
     @property
     def LAZY_TOOL_SERVICE_PORT(self):
