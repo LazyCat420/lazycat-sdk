@@ -200,6 +200,8 @@ class PrismClient:
         stream: bool = False,
         max_iterations: int | None = None,
         session_id: str | None = None,
+        auto_approve: bool = True,
+        thinking_enabled: bool = True,
     ) -> Any:
         """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled."""
         if self._kill_switch_armed:
@@ -257,8 +259,10 @@ class PrismClient:
             "agent": agent_name,
             "systemPrompt": system_prompt[:15000],
             "functionCallingEnabled": False,
-            "autoApprove": True,
+            "autoApprove": auto_approve,
         }
+        if thinking_enabled:
+            payload["thinkingEnabled"] = True
         if max_iterations is not None:
             payload["maxIterations"] = max_iterations
 
@@ -283,6 +287,7 @@ class PrismClient:
             "x-username": username,
         }
 
+        logger.info(f"[INSTRUMENTATION] prism.call_agent attempting to connect to: {url}")
         try:
             if stream:
                 req = client.build_request("POST", url, json=payload, headers=headers)
@@ -294,7 +299,7 @@ class PrismClient:
                 r.raise_for_status()
                 return r
         except Exception as e:
-            logger.error(f"Prism call failed: {e}")
+            logger.error(f"[INSTRUMENTATION] Prism call failed connecting to {url}. Error: {e.__class__.__name__} - {e}")
             raise
 
     async def _call_vllm_direct(
