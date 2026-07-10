@@ -201,7 +201,6 @@ class PrismClient:
         max_iterations: int | None = None,
         session_id: str | None = None,
         auto_approve: bool = True,
-        thinking_enabled: bool = True,
     ) -> Any:
         """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled."""
         if self._kill_switch_armed:
@@ -261,8 +260,6 @@ class PrismClient:
             "functionCallingEnabled": False,
             "autoApprove": auto_approve,
         }
-        if thinking_enabled:
-            payload["thinkingEnabled"] = True
         if max_iterations is not None:
             payload["maxIterations"] = max_iterations
 
