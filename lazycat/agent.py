@@ -232,6 +232,7 @@ class AgentHarness:
                     result = await self._handle_pausing_tool(func_name, arguments)
                     was_blocked = False
                 else:
+                    override_result = None
                     # Internal loop detection
                     loop_block_msg = self.loop_detector.record_call(func_name, arguments, failed=True)
                     if loop_block_msg:
