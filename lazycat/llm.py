@@ -272,10 +272,9 @@ class PrismClient:
                     enabled_tools.append(t["name"])
             payload["enabledTools"] = enabled_tools
 
-        if is_new:
-            payload["createSession"] = True
-        elif session_id:
-            payload["sessionId"] = session_id
+        # Always force a new session on Prism proxy to prevent it from accumulating
+        # duplicate history (since lazycat-sdk manages the conversation history locally).
+        payload["createSession"] = True
 
         url = f"{self.url}/agent?stream={'true' if stream else 'false'}"
         headers = {
@@ -532,10 +531,9 @@ class PrismClient:
                     enabled_tools.append(t)
             payload["enabledTools"] = enabled_tools
 
-        if is_new:
-            payload["createSession"] = True
-        elif session_id:
-            payload["sessionId"] = session_id
+        # Always force a new session on Prism proxy to prevent it from accumulating
+        # duplicate history (since lazycat-sdk manages the conversation history locally).
+        payload["createSession"] = True
 
         # target url for stream
         target_url = f"{self.url}/agent?stream=true"

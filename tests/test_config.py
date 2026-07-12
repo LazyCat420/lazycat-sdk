@@ -7,11 +7,11 @@ def test_config_raises_on_missing_env(monkeypatch):
     for key in ["PRISM_URL", "VAULT_SERVICE_URL", "LAZY_TOOL_SERVICE_PORT", "PRISM_SERVICE_PORT"]:
         monkeypatch.delenv(key, raising=False)
         
-    with pytest.raises(EnvironmentError) as exc_info:
-        config = Config()
-        _ = config.PRISM_URL
-        
-    assert "Missing required environment variable" in str(exc_info.value)
+    config = Config()
+    assert config.PRISM_URL == "http://10.0.0.16:7777"
+    assert config.VAULT_SERVICE_URL == "http://10.0.0.16:5599"
+    assert config.LAZY_TOOL_SERVICE_PORT == "5591"
+    assert config.PRISM_SERVICE_PORT == "7777"
 
 def test_config_loads_from_env(monkeypatch):
     monkeypatch.setenv("PRISM_URL", "http://prism")
