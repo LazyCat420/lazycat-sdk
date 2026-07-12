@@ -129,6 +129,7 @@ class AgentHarness:
         max_iterations: int = 15,
         on_tool_call: Callable[[str, dict], str | None] | None = None,
         on_tool_result: Callable[[str, dict, Any, bool], None] | None = None,
+        max_tool_result_chars: int = 50_000,
     ):
         self.agent = agent
         self.session = session
@@ -138,6 +139,7 @@ class AgentHarness:
         self.on_tool_call = on_tool_call
         # Hook: called after each tool execution with (tool_name, arguments, result, was_blocked).
         self.on_tool_result = on_tool_result
+        self.max_tool_result_chars = max_tool_result_chars
         self.loop_detector = ToolLoopDetector(max_identical_failures=3)
 
     async def run(self, user_input: str | None = None) -> str:
@@ -275,11 +277,21 @@ class AgentHarness:
                     except Exception as hook_err:
                         logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
                 
-                # 5. Add result to history
+                # 5. Add result to history (truncate oversized payloads to prevent context overflow)
+                result_str = json.dumps(result, default=str)
+                if len(result_str) > self.max_tool_result_chars:
+                    logger.warning(
+                        f"[{self.agent.name}] Truncating tool result for {func_name}: "
+                        f"{len(result_str):,} chars → {self.max_tool_result_chars:,} chars"
+                    )
+                    result_str = result_str[:self.max_tool_result_chars] + (
+                        f'\n\n[TRUNCATED: result was {len(result_str):,} chars, '
+                        f'showing first {self.max_tool_result_chars:,}]'
+                    )
                 self.session.add_tool_message(
                     tool_call_id=tc_id,
                     name=func_name,
-                    content=json.dumps(result, default=str)
+                    content=result_str,
                 )
                 
         logger.warning(f"[{self.agent.name}] Reached max iterations ({self.max_iterations})")
