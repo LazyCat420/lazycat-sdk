@@ -656,7 +656,8 @@ class ToolRegistry:
         try:
             import os
             use_lazy = os.getenv("USE_LAZY_TOOL_SERVICE", "false").lower() == "true"
-            if use_lazy:
+            # Bypass lazy-tool-service for save_trading_chart to execute it directly inside trading-service
+            if use_lazy and func_name != "save_trading_chart":
                 from lazycat.tools import tool_executor
                 resp_json = await tool_executor.execute_tool(func_name, kwargs)
                 if "error" in resp_json:
@@ -666,6 +667,8 @@ class ToolRegistry:
             else:
                 service_source = "trading-service"
                 func = self.tools[func_name]
+                if func is None:
+                    raise RuntimeError(f"Tool '{func_name}' has no local registration function in this service context.")
                 if inspect.iscoroutinefunction(func):
                     result = await func(**kwargs)
                 else:
