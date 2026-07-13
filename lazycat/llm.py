@@ -267,8 +267,13 @@ class PrismClient:
         if session_id:
             session_suffix = f"-{session_id[-8:]}"
         elif messages:
-            # Find the first user message to create a sticky session key unique to this conversation thread
-            first_user_msg = next((m for m in messages if m.get("role") == "user"), None)
+            # Find the first user message that is not a dummy acknowledgement to create a sticky session key unique to this conversation thread
+            first_user_msg = next(
+                (m for m in messages if m.get("role") == "user" and m.get("content") != "Acknowledged. I am ready to process the quantitative data."),
+                None
+            )
+            if not first_user_msg:
+                first_user_msg = next((m for m in messages if m.get("role") == "user"), None)
             if first_user_msg and isinstance(first_user_msg.get("content"), str):
                 import hashlib
                 content_hash = hashlib.md5(first_user_msg["content"].encode("utf-8")).hexdigest()[:8]
