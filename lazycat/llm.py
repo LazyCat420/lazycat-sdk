@@ -106,6 +106,8 @@ class PrismClient:
         self._cycle_generation: int = 0
         self._custom_agent_locks: dict[str, asyncio.Lock] = {}
         self._kill_switch_armed: bool = False
+        self._model_to_provider_cache: dict[str, str] = {}
+        self._last_config_fetch: float = 0.0
 
     @property
     def url(self) -> str:
@@ -152,6 +154,48 @@ class PrismClient:
         self._last_health_check = now
 
         return is_up
+
+    async def _resolve_provider_instance(self, model: str, base_provider: str = "vllm") -> str:
+        """
+        Query /config?includeLocal=true from Prism to discover which specific provider
+        instance (e.g., 'vllm-2') holds the requested model.
+        Falls back to base_provider if not found.
+        """
+        if not model:
+            return base_provider
+
+        # Check cache first
+        if model in self._model_to_provider_cache:
+            return self._model_to_provider_cache[model]
+
+        # Fetch config
+        try:
+            import time
+            now = time.time()
+            # Fetch config at most once every 30 seconds
+            if now - self._last_config_fetch > 30:
+                client = await self._get_client()
+                url = self.url.rstrip("/")
+                config_url = f"{url}/config?includeLocal=true"
+                
+                logger.info(f"[PRISM] Fetching config to resolve model '{model}' from: {config_url}")
+                response = await client.get(config_url, timeout=5.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    text_to_text = data.get("textToText", {})
+                    models_map = text_to_text.get("models", {})
+                    for inst_id, model_list in models_map.items():
+                        for m_info in model_list:
+                            m_name = m_info.get("name")
+                            if m_name:
+                                self._model_to_provider_cache[m_name] = inst_id
+                    self._last_config_fetch = now
+        except Exception as e:
+            logger.warning(f"[PRISM] Failed to auto-resolve provider for model '{model}': {e}")
+
+        resolved = self._model_to_provider_cache.get(model, base_provider)
+        logger.info(f"[PRISM] Resolved model '{model}' to provider instance '{resolved}' (base: '{base_provider}')")
+        return resolved
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Lazy-init a persistent async client for connection reuse."""
@@ -245,8 +289,11 @@ class PrismClient:
             if len(new_messages) > 1 and new_messages[1].get("role") == "user":
                 new_messages.insert(1, {"role": "user", "content": "Acknowledged. I am ready to process the quantitative data."})
  
+        # Resolve provider instance for local models to bypass load-balancer single-instance bug in Prism
+        resolved_provider = await self._resolve_provider_instance(model, provider)
+ 
         payload = {
-            "provider": provider,
+            "provider": resolved_provider,
             "model": model,
             "messages": new_messages,
             "maxTokens": max_tokens,
@@ -570,6 +617,9 @@ class PrismClient:
         session_id, is_new = self._get_or_create_session(group_key)
         conversation_id = str(uuid.uuid4())
 
+        # Resolve provider instance for local models to bypass load-balancer single-instance bug in Prism
+        resolved_provider = await self._resolve_provider_instance(model, provider)
+
         payload, url, headers = self.get_stream_payload_and_url(
             model=model,
             messages=messages,
@@ -586,7 +636,7 @@ class PrismClient:
             tools=tools,
             is_qwen_model=is_qwen_model,
             agentic_mode=agentic_mode,
-            provider=provider,
+            provider=resolved_provider,
         )
         if agentContext:
             payload["agentContext"] = agentContext
