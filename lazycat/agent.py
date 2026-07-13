@@ -99,6 +99,7 @@ class BaseAgent:
         max_tokens: int = 8192,
         provider: str = "vllm",
         project: str = "lazycat-sdk-app",
+        username: str = "lazycat-sdk",
         llm_client: Any = None,
         auto_approve: bool = True,
     ):
@@ -109,6 +110,7 @@ class BaseAgent:
         self.max_tokens = max_tokens
         self.provider = provider
         self.project = project
+        self.username = username
         self.tools: list[dict] = []
         self.llm_client = llm_client or prism_client
         self.auto_approve = auto_approve
@@ -158,6 +160,7 @@ class AgentHarness:
                 system_prompt=self.agent.system_prompt,
                 agent_name=self.agent.name,
                 project=self.agent.project,
+                username=self.agent.username,
                 max_tokens=self.agent.max_tokens,
                 tools=self.agent.tools if self.agent.tools else None,
                 provider=self.agent.provider,
