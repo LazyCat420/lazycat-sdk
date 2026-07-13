@@ -190,6 +190,26 @@ class AgentHarness:
                         print(chunk_text, end="", flush=True)
                     elif event_type == "tool_calls" or "toolCalls" in data:
                         tool_calls = data.get("toolCalls", [])
+                    elif event_type == "tool_execution":
+                        status = data.get("status")
+                        tool_call = data.get("toolCall", {})
+                        func_name = tool_call.get("name", "")
+                        try:
+                            arguments = tool_call.get("arguments", {})
+                            if isinstance(arguments, str):
+                                arguments = json.loads(arguments)
+                        except Exception:
+                            arguments = {}
+                        
+                        if status in ("done", "error"):
+                            # This was executed internally by Prism. We record it!
+                            result = data.get("toolResult")
+                            was_blocked = False
+                            if self.on_tool_result is not None:
+                                try:
+                                    self.on_tool_result(func_name, arguments, result, was_blocked)
+                                except Exception as hook_err:
+                                    logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
                     elif event_type == "error":
                         logger.error(f"Prism stream error: {data.get('message')}")
                     elif "text" in data and not event_type:
