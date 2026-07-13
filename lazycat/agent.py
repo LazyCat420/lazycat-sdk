@@ -195,10 +195,10 @@ class AgentHarness:
                         tool_calls = data.get("toolCalls", [])
                     elif event_type == "tool_execution":
                         status = data.get("status")
-                        tool_call = data.get("toolCall", {})
-                        func_name = tool_call.get("name", "")
+                        tool_payload = data.get("tool") or data.get("toolCall", {})
+                        func_name = tool_payload.get("name", "")
                         try:
-                            arguments = tool_call.get("arguments", {})
+                            arguments = tool_payload.get("args") or tool_payload.get("arguments", {})
                             if isinstance(arguments, str):
                                 arguments = json.loads(arguments)
                         except Exception:
@@ -206,7 +206,7 @@ class AgentHarness:
                         
                         if status in ("done", "error"):
                             # This was executed internally by Prism. We record it!
-                            result = data.get("toolResult")
+                            result = tool_payload.get("result") if tool_payload.get("result") is not None else data.get("toolResult")
                             was_blocked = False
                             if self.on_tool_result is not None:
                                 try:
