@@ -263,13 +263,6 @@ class PrismClient:
         auto_approve: bool = True,
     ) -> Any:
         """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled."""
-        if not stream:
-            import traceback
-            logger.warning(f"[DEBUG] call_agent called with stream=False! Stack: {''.join(traceback.format_stack())}")
-        import traceback
-        with open("/app/logs/lazycat_debug.log", "a") as dbg:
-            dbg.write(f"call_agent called with stream={stream}\n")
-            dbg.write(''.join(traceback.format_stack()) + "\n\n")
         
         if self._kill_switch_armed:
             raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
@@ -631,10 +624,6 @@ class PrismClient:
         provider: str = "vllm",
     ):
         """High-level wrapper to stream Prism /agent response."""
-        import traceback
-        with open("/app/logs/lazycat_debug.log", "a") as dbg:
-            dbg.write("agent_chat_stream called\n")
-            dbg.write(''.join(traceback.format_stack()) + "\n\n")
         
         if self._kill_switch_armed:
             raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
