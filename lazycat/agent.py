@@ -130,7 +130,7 @@ class AgentHarness:
         session: ConversationSession,
         max_iterations: int = 15,
         on_tool_call: Callable[[str, dict], str | None] | None = None,
-        on_tool_result: Callable[[str, dict, Any, bool], None] | None = None,
+        on_tool_result: Callable[[str, dict, Any, bool, int], None] | None = None,
         max_tool_result_chars: int = 50_000,
     ):
         self.agent = agent
@@ -210,7 +210,8 @@ class AgentHarness:
                             was_blocked = False
                             if self.on_tool_result is not None:
                                 try:
-                                    self.on_tool_result(func_name, arguments, result, was_blocked)
+                                    elapsed_ms = 0 # Fallback for prism-internal tools
+                                    self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
                                 except Exception as hook_err:
                                     logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
                     elif event_type == "error":
@@ -251,6 +252,7 @@ class AgentHarness:
                             arguments = {}
                 
                 logger.info(f"[{self.agent.name}] Executing tool: {func_name}")
+                elapsed_ms = 0
                 
                 # Check for human-in-the-loop pauses
                 if func_name in ("ask_user_question", "request_plan_approval"):
@@ -278,7 +280,9 @@ class AgentHarness:
                         was_blocked = True
                     else:
                         # Execute via the tool service proxy
+                        t0_tool = time.time()
                         result = await tool_executor.execute_tool(func_name, arguments)
+                        elapsed_ms = int((time.time() - t0_tool) * 1000)
                         was_blocked = False
                         
                         # Record actual outcome
@@ -296,7 +300,7 @@ class AgentHarness:
                 # Notify post-call hook (e.g. ToolLoopDetector records outcome)
                 if self.on_tool_result is not None and func_name not in ("ask_user_question", "request_plan_approval"):
                     try:
-                        self.on_tool_result(func_name, arguments, result, was_blocked)
+                        self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
                     except Exception as hook_err:
                         logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
                 

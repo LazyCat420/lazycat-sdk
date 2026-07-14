@@ -123,7 +123,12 @@ class PrismClient:
         if self._client is not None and not self._client.is_closed:
             try:
                 import asyncio
-                asyncio.create_task(self._client.aclose())
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._client.aclose())
+                except RuntimeError:
+                    # No running loop, let garbage collection handle it
+                    pass
             except Exception as e:
                 logger.warning(f"[PrismClient] Failed to schedule client close: {e}")
             self._client = None
@@ -132,7 +137,18 @@ class PrismClient:
     def reset_kill_switch(self):
         """Re-enables LLM requests."""
         self._kill_switch_armed = False
+        self._model_to_provider_cache.clear()
+        self._last_config_fetch = 0.0
         logger.info("[PrismClient] Kill switch RESET")
+
+    def _prepare_messages(self, messages: list[dict], system_prompt: str) -> list[dict]:
+        """Prepends system prompt and dummy user message if system prompt is not already present."""
+        new_messages = list(messages)
+        if system_prompt and not any(m.get("role") == "system" for m in new_messages):
+            new_messages.insert(0, {"role": "system", "content": system_prompt})
+            if len(new_messages) > 1 and new_messages[1].get("role") == "user":
+                new_messages.insert(1, {"role": "user", "content": "Acknowledged. I am ready to process the quantitative data."})
+        return new_messages
 
     async def check_health(self) -> bool:
         """Dynamically check if Prism is available."""
@@ -247,6 +263,14 @@ class PrismClient:
         auto_approve: bool = True,
     ) -> Any:
         """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled."""
+        if not stream:
+            import traceback
+            logger.warning(f"[DEBUG] call_agent called with stream=False! Stack: {''.join(traceback.format_stack())}")
+        import traceback
+        with open("/app/logs/lazycat_debug.log", "a") as dbg:
+            dbg.write(f"call_agent called with stream={stream}\n")
+            dbg.write(''.join(traceback.format_stack()) + "\n\n")
+        
         if self._kill_switch_armed:
             raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
             
@@ -288,11 +312,7 @@ class PrismClient:
  
         # Prepend system prompt and dummy user message to align system message rewrite in prism-service.
         # This prevents double system prompt errors on Qwen/vLLM.
-        new_messages = list(messages)
-        if system_prompt and not any(m.get("role") == "system" for m in new_messages):
-            new_messages.insert(0, {"role": "system", "content": system_prompt})
-            if len(new_messages) > 1 and new_messages[1].get("role") == "user":
-                new_messages.insert(1, {"role": "user", "content": "Acknowledged. I am ready to process the quantitative data."})
+        new_messages = self._prepare_messages(messages, system_prompt)
  
         # Resolve provider instance for local models to bypass load-balancer single-instance bug in Prism
         resolved_provider = await self._resolve_provider_instance(model, provider)
@@ -548,11 +568,7 @@ class PrismClient:
         """Returns (payload, url, headers) formatted for Prism /agent streaming."""
         # Prepend system prompt and dummy user message to align system message rewrite in prism-service.
         # This prevents double system prompt errors on Qwen/vLLM.
-        new_messages = list(messages)
-        if system_prompt and not any(m.get("role") == "system" for m in new_messages):
-            new_messages.insert(0, {"role": "system", "content": system_prompt})
-            if len(new_messages) > 1 and new_messages[1].get("role") == "user":
-                new_messages.insert(1, {"role": "user", "content": "Acknowledged. I am ready to process the quantitative data."})
+        new_messages = self._prepare_messages(messages, system_prompt)
 
         payload: dict[str, Any] = {
             "provider": provider,
@@ -615,6 +631,11 @@ class PrismClient:
         provider: str = "vllm",
     ):
         """High-level wrapper to stream Prism /agent response."""
+        import traceback
+        with open("/app/logs/lazycat_debug.log", "a") as dbg:
+            dbg.write("agent_chat_stream called\n")
+            dbg.write(''.join(traceback.format_stack()) + "\n\n")
+        
         if self._kill_switch_armed:
             raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
 
