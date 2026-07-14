@@ -1,5 +1,4 @@
 import logging
-from bs4 import BeautifulSoup
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -116,6 +115,10 @@ def canvas_read_dom(canvas_html: str) -> str:
 def canvas_modify_dom(canvas_html: str, css_selector: str, action: str, html_snippet: str = "") -> Dict[str, Any]:
     """Modifies the DOM based on a CSS selector and action."""
     try:
+        # Lazy import (like html_auditor) so importing this module doesn't
+        # require beautifulsoup4 in environments that never call it.
+        from bs4 import BeautifulSoup
+
         soup = BeautifulSoup(canvas_html, "html.parser")
         target = soup.select_one(css_selector)
         if not target:

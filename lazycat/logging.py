@@ -31,6 +31,14 @@ class LogManager:
     AB_DIR = CYCLE_DIR / "ab_results"
 
     def __init__(self):
+        # Directory creation is deferred to first write — a library must not
+        # touch the filesystem at import time (the module-level singleton
+        # below used to mkdir logs/ in whatever CWD imported us).
+        self._dirs_ready = False
+
+    def _ensure_dirs(self):
+        if self._dirs_ready:
+            return
         try:
             self.CYCLE_DIR.mkdir(parents=True, exist_ok=True)
             test_file = self.CYCLE_DIR / ".write_test"
@@ -49,10 +57,11 @@ class LogManager:
             self.AB_DIR.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
+        self._dirs_ready = True
 
-    @staticmethod
-    def _write_jsonl(path: Path, data: dict):
+    def _write_jsonl(self, path: Path, data: dict):
         try:
+            self._ensure_dirs()
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(data, default=str) + "\n")
         except Exception as e:
