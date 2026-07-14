@@ -423,6 +423,7 @@ class ToolRegistry:
         cycle_id: str = "",
         tool_cache: dict | None = None,
         enforce_ticker: bool = False,
+        force_local: bool = False,
     ) -> dict:
         """Execute a single tool call from the LLM and return the formatted result.
 
@@ -436,6 +437,10 @@ class ToolRegistry:
             enforce_ticker: If True, block tool calls where the 'ticker' argument
                             doesn't match the context ticker. Used during debates
                             to prevent cross-ticker data contamination.
+            force_local: If True, ignore USE_LAZY_TOOL_SERVICE and run the local
+                         registration function. Used by HTTP execute endpoints that
+                         lazy-tool-service itself calls — without it the call would
+                         bounce back to lazy-tool-service in an infinite loop.
         """
         tool_call_id = tool_call.get("id")
         function_info = tool_call.get("function", {})
@@ -655,7 +660,10 @@ class ToolRegistry:
         t0 = time.monotonic()
         try:
             import os
-            use_lazy = os.getenv("USE_LAZY_TOOL_SERVICE", "false").lower() == "true"
+            use_lazy = (
+                not force_local
+                and os.getenv("USE_LAZY_TOOL_SERVICE", "false").lower() == "true"
+            )
             # Bypass lazy-tool-service for save_trading_chart to execute it directly inside trading-service
             if use_lazy and func_name != "save_trading_chart":
                 from lazycat.tools import tool_executor
