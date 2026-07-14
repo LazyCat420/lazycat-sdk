@@ -261,8 +261,15 @@ class PrismClient:
         max_iterations: int | None = None,
         session_id: str | None = None,
         auto_approve: bool = True,
+        thinking_enabled: bool | None = None,
     ) -> Any:
-        """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled."""
+        """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled.
+
+        thinking_enabled: None leaves the gateway default (thinking ON for
+        local models on agent sessions); pass False on interactive paths where
+        a user is watching the stream — the <think> block is most of the
+        latency on Qwen-class models.
+        """
         
         if self._kill_switch_armed:
             raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
@@ -327,6 +334,8 @@ class PrismClient:
         }
         if max_iterations is not None:
             payload["maxIterations"] = max_iterations
+        if thinking_enabled is not None:
+            payload["thinkingEnabled"] = thinking_enabled
 
         if tools:
             enabled_tools = []
@@ -460,6 +469,8 @@ class PrismClient:
         guidelines: str = "",
         enabled_tools: list[str] | None = None,
         project: str = "vllm-trading-bot",
+        core_tools_locked: bool = False,
+        thinking_default: bool | None = None,
     ) -> str:
         """Register a custom agent in Prism, or update it if it already exists.
         Returns the custom agent ID (e.g. 'CUSTOM_BEAR_MACRO_SENTIMENT_T2_AGENT').
@@ -517,7 +528,18 @@ class PrismClient:
                 "project": project,
                 "usesDirectoryTree": False,
                 "usesCodingGuidelines": False,
+                # Every agent registered through this helper carries an
+                # explicit tool list, so don't let the gateway force-document
+                # its ~30 CORE_AGENTIC_TOOLS + orchestrator tools next to it
+                # (honored by lazy-tool-service since 2026-07-14; real prism
+                # ignores unknown fields). Callers that want the forced core
+                # set pass core_tools_locked=True.
+                "coreToolsLocked": core_tools_locked,
             }
+            if thinking_default is not None:
+                # Per-agent <think> default; an explicit thinkingEnabled on a
+                # request always wins over this.
+                payload["thinkingDefault"] = thinking_default
 
             if agent_db_id:
                 try:
