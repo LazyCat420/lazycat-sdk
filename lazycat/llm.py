@@ -245,6 +245,16 @@ class PrismClient:
         self._sessions.clear()
         self._conversations.clear()
 
+    def get_conversation_id(self, agent_name: str, session_id: str | None) -> str | None:
+        """Return the conversationId call_agent registered for this agent/session.
+
+        Mirrors call_agent's session-path group_key. Used by AgentHarness to
+        stamp x-conversation-id on /execute so the proxy whitelist (keyed on
+        the conversationId registered from the /agent body) can actually match.
+        """
+        suffix = f"-{session_id[-8:]}" if session_id else ""
+        return self._conversations.get(f"chat-{agent_name}{suffix}")
+
     async def call_agent(
         self,
         model: str,

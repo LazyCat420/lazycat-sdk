@@ -144,6 +144,11 @@ class AgentHarness:
         self.on_tool_result = on_tool_result
         self.max_tool_result_chars = max_tool_result_chars
         self.loop_detector = ToolLoopDetector(max_identical_failures=3)
+        # Token accounting, filled from the stream's cumulative usage_update
+        # events: last_usage is the final snapshot of the most recent request;
+        # total_tokens sums input+output(+reasoning) across all loop iterations.
+        self.last_usage: dict = {}
+        self.total_tokens: int = 0
 
     async def run(self, user_input: str | None = None) -> str:
         """Run the agent loop until it completes or reaches max iterations."""
@@ -163,6 +168,7 @@ class AgentHarness:
                 project=self.agent.project,
                 username=self.agent.username,
                 max_tokens=self.agent.max_tokens,
+                temperature=self.agent.temperature,
                 tools=self.agent.tools if self.agent.tools else None,
                 provider=self.agent.provider,
                 stream=True,
@@ -172,6 +178,7 @@ class AgentHarness:
             
             content = ""
             tool_calls = []
+            request_usage: dict = {}
             
             import json
             try:
@@ -215,15 +222,27 @@ class AgentHarness:
                                     self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
                                 except Exception as hook_err:
                                     logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
+                    elif event_type == "usage_update":
+                        usage = data.get("usage")
+                        if isinstance(usage, dict):
+                            request_usage = usage
                     elif event_type == "error":
                         logger.error(f"Prism stream error: {data.get('message')}")
                     elif "text" in data and not event_type:
                         content = data.get("text", content)
                         tool_calls = data.get("toolCalls", tool_calls)
-                
+
                 print() # flush newline after stream completes
             finally:
                 await resp.aclose()
+
+            if request_usage:
+                self.last_usage = request_usage
+                self.total_tokens += (
+                    int(request_usage.get("inputTokens") or 0)
+                    + int(request_usage.get("outputTokens") or 0)
+                    + int(request_usage.get("reasoningOutputTokens") or 0)
+                )
             
             
             # 2. Add LLM response to history
@@ -280,9 +299,19 @@ class AgentHarness:
                         result = {"blocked": True, "message": override_result}
                         was_blocked = True
                     else:
-                        # Execute via the tool service proxy
+                        # Execute via the tool service proxy. Stamp identity
+                        # headers so the proxy's per-conversation whitelist can
+                        # actually key on this session (it fails open otherwise).
+                        identity_headers = {"x-agent": self.agent.name}
+                        get_conv = getattr(self.agent.llm_client, "get_conversation_id", None)
+                        if callable(get_conv):
+                            conv_id = get_conv(self.agent.name, self.session.session_id)
+                            if conv_id:
+                                identity_headers["x-conversation-id"] = conv_id
                         t0_tool = time.time()
-                        result = await tool_executor.execute_tool(func_name, arguments)
+                        result = await tool_executor.execute_tool(
+                            func_name, arguments, headers=identity_headers
+                        )
                         elapsed_ms = int((time.time() - t0_tool) * 1000)
                         was_blocked = False
                         
