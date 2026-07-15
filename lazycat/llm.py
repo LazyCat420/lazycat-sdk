@@ -15,13 +15,45 @@ class LLMStreamWrapper:
     def __init__(self, response: httpx.Response, is_openai: bool = False):
         self.response = response
         self.is_openai = is_openai
-        
+        # OpenAI streams tool calls as PARTIAL deltas (first delta carries
+        # id+name, later deltas carry argument fragments keyed by index).
+        # Accumulate here and emit ONE complete toolCalls event at the end —
+        # emitting per-delta made the consumer replace its list each time,
+        # losing names and argument fragments (multi-tool calls broke too).
+        self._pending_tool_calls: dict[int, dict] = {}
+
+    def _accumulate_tool_deltas(self, deltas: list[dict]) -> None:
+        for tc in deltas:
+            idx = tc.get("index", 0)
+            entry = self._pending_tool_calls.setdefault(
+                idx, {"id": "", "function": {"name": "", "arguments": ""}}
+            )
+            if tc.get("id"):
+                entry["id"] = tc["id"]
+            fn = tc.get("function", {}) or {}
+            if fn.get("name"):
+                entry["function"]["name"] += fn["name"]
+            if fn.get("arguments"):
+                entry["function"]["arguments"] += fn["arguments"]
+
+    def _flush_tool_calls_event(self) -> str | None:
+        if not self._pending_tool_calls:
+            return None
+        tool_calls = []
+        for idx in sorted(self._pending_tool_calls):
+            entry = self._pending_tool_calls[idx]
+            if not entry["function"]["arguments"]:
+                entry["function"]["arguments"] = "{}"
+            tool_calls.append(entry)
+        self._pending_tool_calls = {}
+        return f"data: {json.dumps({'toolCalls': tool_calls})}"
+
     async def aiter_lines(self):
         if not self.is_openai:
             async for line in self.response.aiter_lines():
                 yield line
             return
-            
+
         buffer = ""
         async for chunk in self.response.aiter_text():
             buffer += chunk
@@ -31,11 +63,14 @@ class LLMStreamWrapper:
                 if not line:
                     continue
                 if line == "data: [DONE]":
+                    flush = self._flush_tool_calls_event()
+                    if flush:
+                        yield flush
                     yield "data: [DONE]"
                     break
                 if not line.startswith("data: "):
                     continue
-                
+
                 try:
                     data = json.loads(line[6:])
                     choices = data.get("choices", [])
@@ -43,26 +78,20 @@ class LLMStreamWrapper:
                         continue
                     choice = choices[0]
                     delta = choice.get("delta", {})
-                    
+
                     if "content" in delta and delta["content"]:
                         prism_data = {"type": "chunk", "content": delta["content"]}
                         yield f"data: {json.dumps(prism_data)}"
-                        
+
                     if "tool_calls" in delta and delta["tool_calls"]:
-                        # OpenAI function format to Prism format:
-                        # OpenAI: [{"function": {"name": ..., "arguments": ...}}]
-                        # Prism: [{"id": ..., "function": {"name": ..., "arguments": ...}}]
-                        tool_calls = []
-                        for tc in delta["tool_calls"]:
-                            tool_calls.append({
-                                "id": tc.get("id", ""),
-                                "function": {
-                                    "name": tc.get("function", {}).get("name", ""),
-                                    "arguments": tc.get("function", {}).get("arguments", "{}")
-                                }
-                            })
-                        prism_data = {"toolCalls": tool_calls}
-                        yield f"data: {json.dumps(prism_data)}"
+                        self._accumulate_tool_deltas(delta["tool_calls"])
+
+                    # vLLM/OpenAI signal completion of the tool-call block via
+                    # finish_reason — flush the assembled calls as one event.
+                    if choice.get("finish_reason"):
+                        flush = self._flush_tool_calls_event()
+                        if flush:
+                            yield flush
                 except Exception as e:
                     logger.debug("Failed decoding openai stream line: %s", e)
                     continue

@@ -160,6 +160,10 @@ class AgentHarness:
             iterations += 1
             
             # 1. Send messages to LLM
+            # max_iterations must go over the wire: on the prism path the
+            # agentic loop runs SERVER-side (prism forces agenticLoopEnabled),
+            # so without maxIterations in the payload the caller's per-role
+            # turn budget never binds — prism used its own default cap.
             resp = await self.agent.llm_client.call_agent(
                 model=self.agent.model,
                 messages=self.session.get_messages(),
@@ -174,6 +178,7 @@ class AgentHarness:
                 stream=True,
                 session_id=self.session.session_id,
                 auto_approve=self.agent.auto_approve,
+                max_iterations=self.max_iterations,
             )
             
             content = ""
