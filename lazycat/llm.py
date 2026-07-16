@@ -406,6 +406,10 @@ class PrismClient:
             else:
                 r = await client.post(url, json=payload, headers=headers, timeout=600.0)
                 r.raise_for_status()
+                # NOTE: non-stream returns the RAW httpx.Response — callers
+                # must .json() it themselves. AgentHarness always uses
+                # stream=True; if you adopt this path, parse before reading
+                # token usage or content.
                 return r
         except Exception as e:
             logger.error(f"[INSTRUMENTATION] Prism call failed connecting to {url}. Error: {e.__class__.__name__} - {e}")
