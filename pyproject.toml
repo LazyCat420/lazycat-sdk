@@ -16,6 +16,7 @@ dependencies = [
     "fastapi",
     "sse-starlette",
     "beautifulsoup4",
+    "ddgs",
 ]
 
 [project.optional-dependencies]
