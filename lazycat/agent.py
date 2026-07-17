@@ -133,10 +133,14 @@ class AgentHarness:
         on_tool_call: Callable[[str, dict], str | None] | None = None,
         on_tool_result: Callable[[str, dict, Any, bool, int], None] | None = None,
         max_tool_result_chars: int = 50_000,
+        thinking_enabled: bool | None = None,
     ):
         self.agent = agent
         self.session = session
         self.max_iterations = max_iterations
+        # None = provider/gateway default; False suppresses <think> blocks on
+        # models that support toggling (prism honors an explicit false).
+        self.thinking_enabled = thinking_enabled
         # Hook: called before each tool execution with (tool_name, arguments).
         # Return None to proceed, or a string to inject as the tool result
         self.on_tool_call = on_tool_call
@@ -179,6 +183,7 @@ class AgentHarness:
                 session_id=self.session.session_id,
                 auto_approve=self.agent.auto_approve,
                 max_iterations=self.max_iterations,
+                thinking_enabled=self.thinking_enabled,
             )
             
             content = ""
