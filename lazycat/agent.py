@@ -453,9 +453,13 @@ class AgentHarness:
         async with httpx.AsyncClient(timeout=600.0) as client:
             async with client.stream(
                 "POST", 
-                url, 
-                json=payload, 
-                headers={"Accept": "text/event-stream"}
+                url,
+                json=payload,
+                # prism attributes by these HEADERS, not body fields — without them
+                # the run lands in prism's unattributable "default" project.
+                headers={"Accept": "text/event-stream",
+                         "x-project": self.agent.project,
+                         "x-username": self.agent.username}
             ) as resp:
                 if resp.status_code != 200:
                     error_body = ""
