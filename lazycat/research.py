@@ -212,7 +212,12 @@ async def research(
                 "POST",
                 f"{base}/agent",
                 json=payload,
-                headers={"Accept": "text/event-stream"},
+                # prism attributes a request by these HEADERS, not the body's
+                # project/username fields — without them every research run was
+                # filed under prism's unattributable "default" project.
+                headers={"Accept": "text/event-stream",
+                         "x-project": project,
+                         "x-username": username},
             ) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode("utf-8", "replace")[:500]
