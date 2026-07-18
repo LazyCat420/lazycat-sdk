@@ -396,7 +396,7 @@ class PrismClient:
             "x-username": username,
         }
 
-        logger.info(f"[INSTRUMENTATION] prism.call_agent attempting to connect to: {url}")
+        logger.debug(f"[INSTRUMENTATION] prism.call_agent attempting to connect to: {url}")
         try:
             if stream:
                 req = client.build_request("POST", url, json=payload, headers=headers)

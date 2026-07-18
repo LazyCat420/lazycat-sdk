@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import os
 import time
 from typing import Any, Callable
 
@@ -9,6 +10,10 @@ from lazycat.tools import tool_executor
 from lazycat.session import ConversationSession
 
 logger = logging.getLogger(__name__)
+
+# Set LAZYCAT_STREAM_STDOUT=1 to echo streamed tokens to stdout (interactive
+# CLI use). Off by default — services must not mix model text into their logs.
+_STREAM_STDOUT = os.environ.get("LAZYCAT_STREAM_STDOUT", "").lower() in ("1", "true", "yes")
 
 class ToolLoopDetector:
     """Detects and breaks tool call loops.
@@ -208,7 +213,12 @@ class AgentHarness:
                     if event_type == "chunk":
                         chunk_text = data.get("content", "")
                         content += chunk_text
-                        print(chunk_text, end="", flush=True)
+                        # Opt-in only: echoing every token to stdout from
+                        # concurrent agents interleaves raw model text
+                        # character-by-character with the service log stream
+                        # (observed corrupting trading-service docker logs).
+                        if _STREAM_STDOUT:
+                            print(chunk_text, end="", flush=True)
                     elif event_type == "tool_calls" or "toolCalls" in data:
                         tool_calls = data.get("toolCalls", [])
                     elif event_type == "tool_execution":
