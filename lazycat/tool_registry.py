@@ -364,6 +364,47 @@ class ToolRegistry:
             )
             raise
 
+    def _schema_params(self, func_name: str) -> tuple[set[str], set[str]]:
+        """Declared (properties, required) parameter names for a tool.
+
+        Returns empty sets when the tool declares no schema, which callers must
+        treat as "pass everything through" rather than "accept nothing".
+        """
+        for schema in self.schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") != func_name:
+                continue
+            params = fn.get("parameters") or {}
+            props = params.get("properties") or {}
+            required = params.get("required") or []
+            return set(props.keys()), set(required)
+        return set(), set()
+
+    def _filter_kwargs_to_schema(
+        self, func_name: str, kwargs: dict
+    ) -> tuple[dict, list[str]]:
+        """Drop arguments the tool never declared.
+
+        Model-emitted arguments are splatted into the Python function, so a
+        malformed key becomes a TypeError that kills the call. Observed in
+        production: whiteboard_write received a key that was a FRAGMENT of a
+        JSON array value —
+
+            whiteboard_write() got an unexpected keyword argument
+            '"regulatory clearance for ai features in china"], "r'
+
+        …which failed the write, so a red-flag the analyst had already found
+        never reached the whiteboard and the board decided without it. The
+        schema is the contract the model was handed; anything outside it is
+        noise and must not be able to break the call.
+        """
+        props, _ = self._schema_params(func_name)
+        if not props:
+            return kwargs, []  # no declared schema — nothing to filter against
+        clean = {k: v for k, v in kwargs.items() if k in props}
+        dropped = [k for k in kwargs if k not in props]
+        return clean, dropped
+
     def _truncate_result(self, func_name: str, result: str) -> str:
         """Truncate tool result if it exceeds max_result_chars.
 
@@ -487,7 +528,48 @@ class ToolRegistry:
             
             # Convert all argument keys to lowercase (e.g. {"Ticker": "IP"} -> {"ticker": "IP"})
             kwargs = {k.lower(): v for k, v in kwargs.items()}
-            
+
+            # Drop anything the tool never declared, so a malformed key cannot
+            # reach func(**kwargs) and raise TypeError.
+            kwargs, _dropped_keys = self._filter_kwargs_to_schema(func_name, kwargs)
+            if _dropped_keys:
+                logger.warning(
+                    "[ToolRegistry] %s: dropped %d undeclared argument(s): %s",
+                    func_name,
+                    len(_dropped_keys),
+                    [k[:60] for k in _dropped_keys],
+                )
+                _props, _required = self._schema_params(func_name)
+                _missing = sorted(_required - set(kwargs))
+                if _missing:
+                    # Dropping noise left a required field unset. Hand the model
+                    # the schema instead of failing on a TypeError it cannot
+                    # interpret — a bare error just gets retried verbatim.
+                    self._log_usage(
+                        func_name or "unknown", agent_name, ticker, cycle_id,
+                        False, 0,
+                        f"Malformed arguments: missing {_missing}",
+                    )
+                    return {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": func_name,
+                        "content": json.dumps(
+                            {
+                                "error": (
+                                    f"Malformed tool arguments. Required field(s) {_missing} "
+                                    f"were missing, and {len(_dropped_keys)} argument(s) were not "
+                                    f"part of this tool's schema. This usually means the JSON was "
+                                    f"not escaped correctly — check that quotes inside string "
+                                    f"values are escaped and that arrays are closed."
+                                ),
+                                "expected_arguments": sorted(_props),
+                                "required_arguments": sorted(_required),
+                                "hint": "Re-issue the call with valid JSON matching the schema above.",
+                            }
+                        ),
+                    }
+
             # Update the parsed arguments representation
             arguments_json = json.dumps(kwargs)
             function_info["arguments"] = arguments_json
