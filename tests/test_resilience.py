@@ -225,7 +225,7 @@ async def test_backoff_strategies_and_max_delay(no_sleep):
 @pytest.mark.asyncio
 async def test_failure_emitter_receives_events(no_sleep):
     seen = []
-    set_failure_emitter(lambda *a: seen.append(a))
+    set_failure_emitter(lambda *a, **kw: seen.append((a, kw)))
 
     @aresilient_call(retries=2)
     async def f():
@@ -235,15 +235,63 @@ async def test_failure_emitter_receives_events(no_sleep):
         await f()
 
     assert len(seen) == 2
-    func_name, attempt, max_attempts, failure_type, exc, elapsed_ms = seen[0]
+    (func_name, attempt, max_attempts, failure_type, exc, elapsed_ms), kw = seen[0]
     assert attempt == 1 and max_attempts == 2
     assert failure_type is FailureType.TRANSIENT
     assert isinstance(elapsed_ms, int)
+    # First attempt of two is interim, not a give-up.
+    assert kw["final"] is False
+    # The final attempt (budget exhausted) is flagged.
+    assert seen[1][1]["final"] is True
+
+
+@pytest.mark.asyncio
+async def test_early_stop_emits_a_final_event(no_sleep):
+    # The gap this closes: a give-up that stops BEFORE the budget is spent —
+    # a registered non-retryable, or a FATAL on a later attempt — used to emit
+    # nothing at all. It must now emit exactly once, flagged final.
+    resilience.NON_RETRYABLE_EXCEPTION_NAMES.add("DoomLoopException")
+
+    class DoomLoopException(Exception):
+        pass
+
+    seen = []
+    set_failure_emitter(lambda *a, **kw: seen.append((a, kw)))
+
+    @aresilient_call(retries=5)
+    async def doomed():
+        raise DoomLoopException("stuck")
+
+    with pytest.raises(ResilientCallError):
+        await doomed()
+
+    assert len(seen) == 1, "early stop should emit exactly one event"
+    (_, attempt, max_attempts, *_), kw = seen[0]
+    assert attempt == 1 and max_attempts == 5  # stopped well before the budget
+    assert kw["final"] is True
+
+
+@pytest.mark.asyncio
+async def test_recovering_call_emits_only_interim_events(no_sleep):
+    seen = []
+    set_failure_emitter(lambda *a, **kw: seen.append(kw))
+    calls = []
+
+    @aresilient_call(retries=5)
+    async def flaky():
+        calls.append(1)
+        if len(calls) < 2:
+            raise asyncio.TimeoutError()
+        return "ok"
+
+    assert await flaky() == "ok"
+    # One failure, then success — the single event is interim, never final.
+    assert seen == [{"final": False}]
 
 
 @pytest.mark.asyncio
 async def test_emitter_exceptions_never_break_the_call_path(no_sleep):
-    def bad_emitter(*a):
+    def bad_emitter(*a, **kw):
         raise RuntimeError("monitoring is down")
 
     set_failure_emitter(bad_emitter)

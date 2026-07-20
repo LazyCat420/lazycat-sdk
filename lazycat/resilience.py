@@ -62,8 +62,13 @@ def set_failure_emitter(fn: Callable | None) -> None:
     """Register a monitoring hook invoked on every failed attempt.
 
     The callable receives (func_name, attempt, max_attempts, failure_type,
-    exc, elapsed_ms). Exceptions raised by the emitter are swallowed — the
-    retry path must never fail because of monitoring.
+    exc, elapsed_ms) positionally plus a keyword `final: bool` — True when this
+    failure ended the call (budget exhausted OR an unrecoverable error stopped
+    it early). Accept `final` (or `**kwargs`); an emitter that only reports
+    give-ups should gate on it rather than comparing attempt counts, since an
+    early stop is final with attempt < max_attempts. Exceptions raised by the
+    emitter are swallowed — the retry path must never fail because of
+    monitoring.
     """
     global _failure_emitter
     _failure_emitter = fn
@@ -236,8 +241,16 @@ def _emit_failure_event(
     failure_type: FailureType,
     exc: Exception,
     elapsed_ms: int,
+    final: bool = False,
 ):
     """Forward a structured failure event to the registered emitter, if any.
+
+    `final` is True when this failure ended the call — either the retry budget
+    was exhausted or an unrecoverable error stopped it early. Emitters that only
+    care about give-ups should key off this flag rather than counting attempts:
+    an early stop (e.g. DoomLoopException on attempt 1 of 5) is final even
+    though `attempt < max_attempts`, and inferring finality from the counts
+    misses exactly those cases.
 
     Non-blocking — if no emitter is registered or it raises, we continue.
     The resilience decorator must never fail because of monitoring.
@@ -246,7 +259,7 @@ def _emit_failure_event(
         return
     try:
         _failure_emitter(
-            func_name, attempt, max_attempts, failure_type, exc, elapsed_ms
+            func_name, attempt, max_attempts, failure_type, exc, elapsed_ms, final=final
         )
     except Exception:
         pass  # Monitoring must never break the call path
@@ -338,6 +351,13 @@ def aresilient_call(
                             type(exc).__name__,
                         )
                         attempts.append(record)
+                        # Early stop is a give-up: emit it (final=True) so a
+                        # DoomLoopException / early-FATAL is as visible as a
+                        # budget exhaustion, not silently swallowed here.
+                        _emit_failure_event(
+                            func_name, attempt, retries, failure_type, exc, elapsed,
+                            final=True,
+                        )
                         break
 
                     attempts.append(record)
@@ -352,8 +372,11 @@ def aresilient_call(
                         elapsed,
                     )
 
+                    # The last attempt failing (no more retries left) is also a
+                    # give-up, so mark it final too.
                     _emit_failure_event(
-                        func_name, attempt, retries, failure_type, exc, elapsed
+                        func_name, attempt, retries, failure_type, exc, elapsed,
+                        final=(attempt >= retries),
                     )
 
                     # Wait before next attempt (unless last attempt)
@@ -466,6 +489,10 @@ def resilient_call(
 
                     if _should_stop(exc, failure_type, attempt):
                         attempts.append(record)
+                        _emit_failure_event(
+                            func_name, attempt, retries, failure_type, exc, elapsed,
+                            final=True,
+                        )
                         break
 
                     attempts.append(record)
@@ -481,7 +508,8 @@ def resilient_call(
                     )
 
                     _emit_failure_event(
-                        func_name, attempt, retries, failure_type, exc, elapsed
+                        func_name, attempt, retries, failure_type, exc, elapsed,
+                        final=(attempt >= retries),
                     )
 
                     if attempt < retries:
