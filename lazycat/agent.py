@@ -8,6 +8,7 @@ from typing import Any, Callable
 from lazycat.llm import prism_client
 from lazycat.tools import tool_executor
 from lazycat.session import ConversationSession
+from lazycat.sse import format_sse, iter_sse_json_lines, iter_sse_lines
 
 logger = logging.getLogger(__name__)
 
@@ -197,18 +198,7 @@ class AgentHarness:
             
             import json
             try:
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data_str = line[6:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-                        
+                async for data in iter_sse_json_lines(resp.aiter_lines(), done_sentinel="[DONE]"):
                     event_type = data.get("type")
                     if event_type == "chunk":
                         chunk_text = data.get("content", "")
@@ -465,14 +455,8 @@ class AgentHarness:
                     error_body = ""
                     async for chunk in resp.aiter_text():
                         error_body += chunk
-                    yield f'data: {json.dumps({"type": "error", "message": f"Prism error {resp.status_code}: {error_body[:500]}"})}\\n\\n'
+                    yield format_sse({"type": "error", "message": f"Prism error {resp.status_code}: {error_body[:500]}"})
                     return
-                
-                buffer = ""
-                async for chunk in resp.aiter_text():
-                    buffer += chunk
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.strip()
-                        if line:
-                            yield f"{line}\n\n"
+
+                async for line in iter_sse_lines(resp.aiter_text()):
+                    yield f"{line}\n\n"

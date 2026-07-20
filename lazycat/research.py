@@ -39,6 +39,7 @@ from typing import Any, Optional
 import httpx
 
 from .logging import get_logger
+from .sse import iter_sse_json
 
 logger = get_logger(__name__)
 
@@ -223,43 +224,32 @@ async def research(
                     body = (await resp.aread()).decode("utf-8", "replace")[:500]
                     logger.error("research: gateway %s: %s", resp.status_code, body)
                     return None
-                buf = ""
-                async for chunk in resp.aiter_text():
-                    buf += chunk
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        line = line.strip()
-                        if not line.startswith("data: "):
-                            continue
-                        try:
-                            ev = json.loads(line[6:])
-                        except json.JSONDecodeError:
-                            continue
-                        etype = ev.get("type")
-                        if etype == "chunk":
-                            final_text += ev.get("content", "")
-                        elif etype == "tool_execution":
-                            tool = ev.get("tool") or ev.get("toolCall") or {}
-                            name = tool.get("name", "")
-                            if name and name not in tool_names:
-                                tool_names.append(name)
-                            if name == "emit_structured_output":
-                                args = tool.get("args") or tool.get("arguments") or {}
-                                if isinstance(args, str):
-                                    try:
-                                        args = json.loads(args)
-                                    except json.JSONDecodeError:
-                                        args = {}
-                                data = args.get("data", args)
-                                if isinstance(data, str):
-                                    try:
-                                        data = json.loads(data)
-                                    except json.JSONDecodeError:
-                                        pass
-                                if isinstance(data, dict) and data:
-                                    emitted = data  # last emit wins
-                        elif etype == "error":
-                            logger.warning("research: agent error: %s", ev.get("message"))
+                async for ev in iter_sse_json(resp.aiter_text()):
+                    etype = ev.get("type")
+                    if etype == "chunk":
+                        final_text += ev.get("content", "")
+                    elif etype == "tool_execution":
+                        tool = ev.get("tool") or ev.get("toolCall") or {}
+                        name = tool.get("name", "")
+                        if name and name not in tool_names:
+                            tool_names.append(name)
+                        if name == "emit_structured_output":
+                            args = tool.get("args") or tool.get("arguments") or {}
+                            if isinstance(args, str):
+                                try:
+                                    args = json.loads(args)
+                                except json.JSONDecodeError:
+                                    args = {}
+                            data = args.get("data", args)
+                            if isinstance(data, str):
+                                try:
+                                    data = json.loads(data)
+                                except json.JSONDecodeError:
+                                    pass
+                            if isinstance(data, dict) and data:
+                                emitted = data  # last emit wins
+                    elif etype == "error":
+                        logger.warning("research: agent error: %s", ev.get("message"))
         except Exception as e:
             logger.error("research(%r) stream failed: %s", topic, e)
             # fall through — a partial final_text may still parse

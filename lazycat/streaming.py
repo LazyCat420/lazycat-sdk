@@ -4,6 +4,8 @@ from typing import AsyncGenerator
 import httpx
 from fastapi.responses import StreamingResponse
 
+from lazycat.sse import format_sse, iter_sse_json
+
 logger = logging.getLogger(__name__)
 
 async def stream_prism_events(
@@ -13,7 +15,7 @@ async def stream_prism_events(
     timeout: float = 600.0,
 ) -> AsyncGenerator[str, None]:
     """
-    Connect to Prism's SSE /agent endpoint, parse its raw JSON events, and 
+    Connect to Prism's SSE /agent endpoint, parse its raw JSON events, and
     yield formatted SSE strings for a frontend client to consume.
     """
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -28,65 +30,51 @@ async def stream_prism_events(
                     error_body = ""
                     async for chunk in resp.aiter_text():
                         error_body += chunk
-                    yield f'data: {json.dumps({"type": "error", "message": f"Prism error {resp.status_code}: {error_body[:500]}"})}\n\n'
+                    yield format_sse({"type": "error", "message": f"Prism error {resp.status_code}: {error_body[:500]}"})
                     return
 
-                buffer = ""
-                async for chunk in resp.aiter_text():
-                    buffer += chunk
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.strip()
+                async for event in iter_sse_json(resp.aiter_text()):
+                    event_type = event.get("type", "")
 
-                        if not line.startswith("data: "):
-                            continue
+                    if event_type == "chunk":
+                        yield format_sse({"type": "chunk", "content": event.get("content", "")})
 
-                        try:
-                            event = json.loads(line[6:])
-                        except json.JSONDecodeError:
-                            continue
+                    elif event_type == "tool_execution":
+                        status = event.get("status", "")
+                        tool_info = event.get("tool", {})
+                        tool_name = tool_info.get("name", "unknown")
 
-                        event_type = event.get("type", "")
+                        if status == "calling":
+                            yield format_sse({"type": "tool_call", "tool": tool_name})
+                            yield format_sse({"type": "status", "message": f"executing {tool_name}..."})
 
-                        if event_type == "chunk":
-                            yield f'data: {json.dumps({"type": "chunk", "content": event.get("content", "")})}\n\n'
+                        elif status in ("done", "success"):
+                            result = tool_info.get("result", {})
+                            if isinstance(result, str):
+                                try:
+                                    result = json.loads(result)
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
 
-                        elif event_type == "tool_execution":
-                            status = event.get("status", "")
-                            tool_info = event.get("tool", {})
-                            tool_name = tool_info.get("name", "unknown")
+                            # Yield raw tool result back to the frontend in case it's needed
+                            yield format_sse({"type": "tool_result", "tool": tool_name, "result": result})
 
-                            if status == "calling":
-                                yield f'data: {json.dumps({"type": "tool_call", "tool": tool_name})}\n\n'
-                                yield f'data: {json.dumps({"type": "status", "message": f"executing {tool_name}..."})}\n\n'
+                        elif status == "error":
+                            error_msg = tool_info.get("result", "Unknown tool error")
+                            yield format_sse({"type": "status", "message": f"tool error: {tool_name}: {str(error_msg)[:200]}"})
 
-                            elif status in ("done", "success"):
-                                result = tool_info.get("result", {})
-                                if isinstance(result, str):
-                                    try:
-                                        result = json.loads(result)
-                                    except (json.JSONDecodeError, TypeError):
-                                        pass
-                                
-                                # Yield raw tool result back to the frontend in case it's needed
-                                yield f'data: {json.dumps({"type": "tool_result", "tool": tool_name, "result": result})}\n\n'
+                    elif event_type == "thinking":
+                        yield format_sse({"type": "status", "message": "reasoning..."})
 
-                            elif status == "error":
-                                error_msg = tool_info.get("result", "Unknown tool error")
-                                yield f'data: {json.dumps({"type": "status", "message": f"tool error: {tool_name}: {str(error_msg)[:200]}"})}\n\n'
+                    elif event_type == "done":
+                        yield 'data: {"type": "done"}\n\n'
 
-                        elif event_type == "thinking":
-                            yield f'data: {json.dumps({"type": "status", "message": "reasoning..."})}\n\n'
-
-                        elif event_type == "done":
-                            yield 'data: {"type": "done"}\n\n'
-
-                        elif event_type == "error":
-                            yield f'data: {json.dumps({"type": "error", "message": event.get("message", "Agent error")})}\n\n'
+                    elif event_type == "error":
+                        yield format_sse({"type": "error", "message": event.get("message", "Agent error")})
 
         except Exception as e:
             logger.error(f"Prism SSE proxy error: {e}")
-            yield f'data: {json.dumps({"type": "error", "message": f"Connection error: {str(e)}"})}\n\n'
+            yield format_sse({"type": "error", "message": f"Connection error: {str(e)}"})
             yield 'data: {"type": "done"}\n\n'
 
 def create_streaming_response(

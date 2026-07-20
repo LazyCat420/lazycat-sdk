@@ -7,6 +7,7 @@ import httpx
 from httpx import RequestError, HTTPStatusError
 
 from lazycat.config import config
+from lazycat.sse import iter_sse_lines
 import json
 
 logger = logging.getLogger(__name__)
@@ -54,48 +55,43 @@ class LLMStreamWrapper:
                 yield line
             return
 
-        buffer = ""
-        async for chunk in self.response.aiter_text():
-            buffer += chunk
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.strip()
-                if not line:
+        async for line in iter_sse_lines(self.response.aiter_text()):
+            if line == "data: [DONE]":
+                flush = self._flush_tool_calls_event()
+                if flush:
+                    yield flush
+                yield "data: [DONE]"
+                # [DONE] terminates an OpenAI-compatible stream; stop reading
+                # instead of draining the rest of the connection.
+                return
+            if not line.startswith("data: "):
+                continue
+
+            try:
+                data = json.loads(line[6:])
+                choices = data.get("choices", [])
+                if not choices:
                     continue
-                if line == "data: [DONE]":
+                choice = choices[0]
+                delta = choice.get("delta", {})
+
+                if "content" in delta and delta["content"]:
+                    prism_data = {"type": "chunk", "content": delta["content"]}
+                    yield f"data: {json.dumps(prism_data)}"
+
+                if "tool_calls" in delta and delta["tool_calls"]:
+                    self._accumulate_tool_deltas(delta["tool_calls"])
+
+                # vLLM/OpenAI signal completion of the tool-call block via
+                # finish_reason — flush the assembled calls as one event.
+                if choice.get("finish_reason"):
                     flush = self._flush_tool_calls_event()
                     if flush:
                         yield flush
-                    yield "data: [DONE]"
-                    break
-                if not line.startswith("data: "):
-                    continue
+            except Exception as e:
+                logger.debug("Failed decoding openai stream line: %s", e)
+                continue
 
-                try:
-                    data = json.loads(line[6:])
-                    choices = data.get("choices", [])
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta", {})
-
-                    if "content" in delta and delta["content"]:
-                        prism_data = {"type": "chunk", "content": delta["content"]}
-                        yield f"data: {json.dumps(prism_data)}"
-
-                    if "tool_calls" in delta and delta["tool_calls"]:
-                        self._accumulate_tool_deltas(delta["tool_calls"])
-
-                    # vLLM/OpenAI signal completion of the tool-call block via
-                    # finish_reason — flush the assembled calls as one event.
-                    if choice.get("finish_reason"):
-                        flush = self._flush_tool_calls_event()
-                        if flush:
-                            yield flush
-                except Exception as e:
-                    logger.debug("Failed decoding openai stream line: %s", e)
-                    continue
-                    
     async def aclose(self):
         await self.response.aclose()
 
