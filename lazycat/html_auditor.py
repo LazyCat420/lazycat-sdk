@@ -1,5 +1,16 @@
+import logging
 from html.parser import HTMLParser
 from typing import List, Tuple, Dict, Any
+
+_logger = logging.getLogger(__name__)
+
+# beautifulsoup4 is a declared dependency of this package. It is imported
+# tolerantly so a missing install degrades the functional audit loudly (see
+# audit_functional_html) instead of hard-failing every importer of this module.
+try:
+    from bs4 import BeautifulSoup
+except ImportError:  # pragma: no cover - exercised only on broken installs
+    BeautifulSoup = None
 
 ALLOWED_TAGS = {
     "article", "section", "header", "p", "ul", "ol", "li", "blockquote", "hr",
@@ -70,25 +81,33 @@ def audit_functional_html(html_str: str) -> dict:
     if "onclick=\"return false\"" in html_str or "onclick='return false'" in html_str:
         errors.append("Found dead button (onclick='return false'). You MUST provide a real inline JavaScript function instead of 'return false'.")
         
-    try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html_str, "html.parser")
-        
-        # Check buttons
-        for btn in soup.find_all("button"):
-            if not btn.get("onclick") and not btn.get("id") and not btn.get("class") and not btn.get("type") == "submit":
-                errors.append("Found a <button> with no onclick handler, id, or class. It appears dead.")
-                
-        # Check links
-        for a in soup.find_all("a"):
-            if a.get("href") == "#" and not a.get("onclick"):
-                errors.append("Found a link (<a href='#'>) with no onclick handler. It appears dead.")
-                
-    except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Failed to audit HTML: {e}")
-        
+    if BeautifulSoup is None:
+        # beautifulsoup4 is a declared dependency; if it is genuinely absent the
+        # dead-button/dead-link checks below cannot run. Previously the ImportError
+        # was swallowed by a broad `except Exception`, so the audit silently
+        # returned is_valid=True and vouched for HTML it had never inspected.
+        _logger.warning(
+            "beautifulsoup4 unavailable — functional HTML audit is DEGRADED "
+            "(dead-button/dead-link checks skipped)."
+        )
+    else:
+        try:
+            soup = BeautifulSoup(html_str, "html.parser")
+
+            # Check buttons
+            for btn in soup.find_all("button"):
+                if not btn.get("onclick") and not btn.get("id") and not btn.get("class") and not btn.get("type") == "submit":
+                    errors.append("Found a <button> with no onclick handler, id, or class. It appears dead.")
+
+            # Check links
+            for a in soup.find_all("a"):
+                if a.get("href") == "#" and not a.get("onclick"):
+                    errors.append("Found a link (<a href='#'>) with no onclick handler. It appears dead.")
+
+        except Exception as e:
+            _logger.error(f"Failed to audit HTML: {e}")
+
+
     return {
         "is_valid": len(errors) == 0,
         "errors": errors
