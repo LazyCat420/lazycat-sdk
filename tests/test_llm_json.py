@@ -188,3 +188,15 @@ def test_strict_raises_on_garbage():
 
 def test_strict_handles_think_block_then_json():
     assert parse_json_strict('<think>x</think>```json\n{"ok": true}\n```') == {"ok": True}
+
+
+def test_strict_handles_prose_appended_after_the_object():
+    # Models routinely sign off after the JSON. extract_json_str returns
+    # bare-JSON-looking input verbatim, so strict parsing must fall back to a
+    # balanced scan rather than choking on the trailing sentence.
+    assert parse_json_strict('{"a": 1} hope that helps!') == {"a": 1}
+    assert parse_json_strict('{"a": 1}\n\nLet me know if you need more.') == {"a": 1}
+
+
+def test_strict_parses_top_level_array():
+    assert parse_json_strict('[{"a": 1}, {"b": 2}]') == [{"a": 1}, {"b": 2}]

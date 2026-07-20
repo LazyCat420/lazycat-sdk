@@ -95,6 +95,22 @@ def extract_json_str(text: str, allow_truncated: bool = False) -> str:
     text = text.strip()
     if text.startswith("{") or text.startswith("["):
         return text
+
+    span = _scan_balanced(text)
+    if span is not None:
+        return span
+
+    if allow_truncated:
+        return _salvage_truncated(text)
+    return text
+
+
+def _scan_balanced(text: str) -> str | None:
+    """Return the earliest balanced {...} or [...] span, or None.
+
+    String-aware, so braces and brackets inside string literals don't affect
+    the depth count. Tries the next opener when one never balances.
+    """
     pairs = {"{": "}", "[": "]"}
     starts = [i for i, ch in enumerate(text) if ch in pairs][:10]
     for start in starts:
@@ -122,10 +138,7 @@ def extract_json_str(text: str, allow_truncated: bool = False) -> str:
                 depth -= 1
                 if depth == 0:
                     return text[start : i + 1]
-
-    if allow_truncated:
-        return _salvage_truncated(text)
-    return text
+    return None
 
 
 def _salvage_truncated(text: str) -> str:
@@ -328,4 +341,20 @@ def parse_json_strict(text: str) -> Any:
     """
     cleaned = strip_think_tags(text)
     cleaned = _strip_think_markers(cleaned)
-    return json.loads(extract_json_str(cleaned, allow_truncated=True))
+    candidate = extract_json_str(cleaned, allow_truncated=True)
+
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    # extract_json_str hands back input that already looks like bare JSON
+    # verbatim, which fails to parse when the model appended prose after the
+    # object ('{"a": 1} hope that helps!'). Fall back to a balanced scan.
+    span = _scan_balanced(candidate)
+    if span is not None:
+        return json.loads(span)
+
+    # Nothing salvageable — re-raise against the best candidate we had so the
+    # error message points at real content.
+    return json.loads(candidate)
