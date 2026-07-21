@@ -43,9 +43,9 @@ from .sse import iter_sse_json
 
 logger = get_logger(__name__)
 
-# The gateway (lazy-tool-service) is where the DEEP_RESEARCH persona lives — NOT
-# real prism (:7777), which has no such catalog registered. Host :5591 maps to the
-# container's :7778. Overridable for other hosts / the in-container port.
+# The gateway (lazy-tool-service, host :5591) is where the DEEP_RESEARCH persona
+# lives — NOT real prism (:7777), which has no such catalog registered.
+# Overridable for other hosts.
 DEFAULT_GATEWAY_URL = os.getenv(
     "LAZY_AGENT_URL", os.getenv("LAZY_TOOL_SERVICE_URL", "http://10.0.0.16:5591")
 )
