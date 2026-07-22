@@ -8,7 +8,7 @@ tools in a loop, it does the retrieval itself in deterministic Python —
   1. fan out over news sources concurrently (DuckDuckGo News + Text, keyless;
      Finnhub if FINNHUB_API_KEY is set),
   2. dedupe (Jaccard title similarity) + optional freshness gate,
-  3. scrape the top-N article bodies via the scraper HTTP API (:3031/scrape/batch,
+  3. scrape the top-N article bodies via the scraper HTTP API (:8001/scrape/batch,
      the consolidated scraper that actually works — NOT the broken agent tool),
   4. format a numbered [1][2][3] citation context,
   5. run ONE direct vLLM synthesis pass into a {title, overview, answer, sources}
@@ -41,9 +41,9 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
-# The consolidated scraper (trading-service/app/scraper) — served at :3031. Used
+# The consolidated scraper (trading-service/app/scraper) — served at :8001. Used
 # via HTTP so this shared helper needs no scraper code of its own.
-DEFAULT_SCRAPER_URL = os.getenv("SCRAPER_SERVICE_URL", "http://10.0.0.16:3031")
+DEFAULT_SCRAPER_URL = os.getenv("SCRAPER_SERVICE_URL", "http://10.0.0.16:8001")
 # Gold Spark (fast) for the single synthesis pass. Direct completion, no agent loop.
 DEFAULT_VLLM_URL = os.getenv("GROUNDED_VLLM_URL", os.getenv("VLLM_URL", "http://10.0.0.141:8000"))
 
