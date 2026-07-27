@@ -62,7 +62,8 @@ old hand-rolled loop* before the refactor landed, then re-run after.
 
 ## Consumers — IMPORTANT
 
-Three repos consume this SDK, in two different ways:
+Three repos consume this SDK. **This checkout is the only tracked copy** — no
+consumer vendors it into git any more.
 
 - **trading-service** and **HTML-Notes** mount the sibling checkout
   (`../lazycat-sdk:/app/lazycat-sdk:ro`, `PYTHONPATH=/app/lazycat-sdk`).
@@ -70,9 +71,22 @@ Three repos consume this SDK, in two different ways:
   either one updates the SDK directory the other mounts. Running containers
   keep their old code until they restart — so **deploy both consumers in the
   same session** after changing the SDK.
-- **lazy-agent-service** bundles a *copy* at `python/lazycat/`. It must be
-  synced by hand after SDK changes or the twins drift:
-  `cp lazycat-sdk/lazycat/*.py lazy-agent-service/python/lazycat/`
+- **scraper-service** keeps a copy at `scraper-service/lazycat/`, but it is
+  **gitignored build output**: `scraper-service/deploy.sh` deletes and re-copies
+  it from `../lazycat-sdk` on every deploy. A stale working copy there is
+  expected and self-heals; never hand-edit it.
+- **lazy-agent-service** used to bundle a hand-synced copy at `python/lazycat/`.
+  **That whole tree was retired on 2026-07-27** — it never shipped (the image is
+  Node-only, with no interpreter), so it could only ever drift. That repo is not
+  an SDK consumer.
+
+### Version discipline
+
+`__version__` in `lazycat/__init__.py` and `version` in `pyproject.toml` must be
+bumped **together, on every content change**. On 2026-07-27 all three copies in
+the ecosystem declared `0.3.1` while their `agent.py` files differed — commit
+`a201770` had landed without a bump, so the version string could not be used to
+detect drift at all. Bumped to `0.3.2` to restore that signal.
 
 ## Known gaps / next
 
