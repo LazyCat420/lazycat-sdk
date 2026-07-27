@@ -166,6 +166,10 @@ class AgentHarness:
             self.session.add_user_message(user_input)
             
         iterations = 0
+        # func_name -> monotonic start of a prism-internal tool call, set on
+        # the "calling" event and consumed on "done"/"error". Per-run rather
+        # than per-instance so a reused harness cannot leak stale timings.
+        prism_tool_started: dict[str, float] = {}
         while iterations < self.max_iterations:
             iterations += 1
             
@@ -222,13 +226,26 @@ class AgentHarness:
                         except Exception:
                             arguments = {}
                         
-                        if status in ("done", "error"):
+                        if status == "calling":
+                            # Prism announces the call before executing it, so
+                            # the round trip IS measurable from here. Without
+                            # this, every prism-internal tool was recorded at
+                            # elapsed_ms=0 (the branch below hardcoded it),
+                            # which is nearly all of them — a trading-service
+                            # audit on 2026-07-27 found all 8 lazy_web_search
+                            # failures logged as 0ms, making a fast refusal
+                            # indistinguishable from a 20s connect timeout.
+                            prism_tool_started[func_name] = time.time()
+                        elif status in ("done", "error"):
                             # This was executed internally by Prism. We record it!
                             result = tool_payload.get("result") if tool_payload.get("result") is not None else data.get("toolResult")
                             was_blocked = False
                             if self.on_tool_result is not None:
                                 try:
-                                    elapsed_ms = 0 # Fallback for prism-internal tools
+                                    _t0 = prism_tool_started.pop(func_name, None)
+                                    # 0 still means "not measurable" — a missing
+                                    # `calling` event, not a 0ms call.
+                                    elapsed_ms = int((time.time() - _t0) * 1000) if _t0 else 0
                                     self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
                                 except Exception as hook_err:
                                     logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
