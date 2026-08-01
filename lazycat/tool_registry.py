@@ -161,10 +161,76 @@ def get_default_domain_and_labels(tool_name: str) -> tuple[str, list[str]]:
 
 
 class ToolRegistry:
+    """Registry of tool implementations and the schemas agents are shown.
+
+    ONE SCHEMA PER NAME. `schemas` is a list because every consumer sends it
+    straight to an LLM as the `tools` array, but a name may appear at most
+    once. Two sources feed it — the compiled catalog (`load_from_json`) and the
+    `@register` decorator — and both used to append blindly, so any tool
+    present in both was sent to the model TWICE.
+
+    Measured in trading-service on 2026-07-31: 54 of 56 tools doubled, so every
+    agent's tool array was exactly 2x its whitelist (user_chat 29 -> 56 schemas,
+    v3_worker_fundamental 4 -> 8) on every single LLM call. Three of the pairs
+    disagreed about their contract, which is how `get_sec_filings` was shown as
+    both `required: ["ticker"]` and `required: []` with a `symbol` alias, and
+    failed ~20% of calls.
+
+    THE CATALOG WINS. When both sources define a name, the compiled catalog's
+    schema is the one kept, because that is already the one enforced: the arg
+    filter and required-field check read `_schema_params`, which returns the
+    first match, and the catalog loads first. Keeping the catalog makes what
+    the model is SHOWN identical to what the executor ENFORCES. The decorator's
+    schema is the fallback for tools the catalog does not carry — which is also
+    why `description=` on the decorator appears inert for catalogued tools.
+    """
+
     def __init__(self):
         self.tools: dict[str, Callable] = {}
         self.schemas: list[dict] = []
         self._meta: dict[str, ToolMeta] = {}
+        # name -> index into self.schemas, so replacing a schema keeps its
+        # position (order is stable across boots, which keeps prompt caching
+        # effective) instead of moving it to the end.
+        self._schema_index: dict[str, int] = {}
+
+    def _put_schema(self, name: str, schema: dict, *, source: str) -> None:
+        """Insert or replace the single schema for `name`.
+
+        `source` is "catalog" or "decorator". A catalog entry overwrites a
+        decorator entry; a decorator entry never overwrites a catalog entry.
+        Contract disagreements are logged rather than silently resolved — a
+        shadowed schema is drift between the Python signature and the compiled
+        catalog, and it should be fixed at the source folder, not here.
+        """
+        if not name:
+            return
+        existing_at = self._schema_index.get(name)
+        if existing_at is None:
+            self._schema_index[name] = len(self.schemas)
+            self.schemas.append(schema)
+            return
+
+        kept, incoming = self.schemas[existing_at], schema
+        if source == "catalog":
+            self.schemas[existing_at] = incoming
+            kept, incoming = incoming, kept
+
+        def _contract(s: dict) -> tuple:
+            p = (s.get("function", {}).get("parameters") or {})
+            return (
+                tuple(sorted((p.get("properties") or {}).keys())),
+                tuple(sorted(p.get("required") or [])),
+            )
+
+        if _contract(kept) != _contract(incoming):
+            logger.warning(
+                "[ToolRegistry] %s: catalog and decorator declare DIFFERENT "
+                "parameters — keeping the catalog's %s, ignoring %s. Fix the "
+                "mismatch in tool_schemas/ so the model sees what the executor "
+                "enforces.",
+                name, _contract(kept), _contract(incoming),
+            )
 
     def load_from_json(self, filepath: str):
         """Load schemas from a pre-compiled JSON file (e.g. tool_schemas.json)."""
@@ -224,8 +290,14 @@ class ToolRegistry:
                         labels=s.get("labels", []),
                     )
             
-            self.schemas.extend(normalized_schemas)
-        logger.info(f"[ToolRegistry] Loaded {len(self.schemas)} schemas from {filepath}")
+            for norm in normalized_schemas:
+                self._put_schema(
+                    norm.get("function", {}).get("name", ""), norm, source="catalog"
+                )
+        logger.info(
+            "[ToolRegistry] Loaded %d schemas from %s (%d unique tools registered)",
+            len(normalized_schemas), filepath, len(self.schemas),
+        )
 
     def register(
         self,
@@ -284,7 +356,8 @@ class ToolRegistry:
                 labels=resolved_labels,
             )
 
-            self.schemas.append(
+            self._put_schema(
+                tool_name,
                 {
                     "type": "function",
                     "function": {
@@ -295,7 +368,8 @@ class ToolRegistry:
                         "parameters": parameters
                         or {"type": "object", "properties": {}, "required": []},
                     },
-                }
+                },
+                source="decorator",
             )
             return f
 
@@ -379,6 +453,46 @@ class ToolRegistry:
             required = params.get("required") or []
             return set(props.keys()), set(required)
         return set(), set()
+
+    def _unbindable_params(self, func_name: str, kwargs: dict) -> list[str] | None:
+        """Parameters that make `func(**kwargs)` raise TypeError, or None.
+
+        This is the oracle for "the call cannot execute", and it is deliberately
+        the FUNCTION's signature rather than the schema's `required` list. The
+        two disagree: 4 of the 40 tools with required fields declare one the
+        Python function happily defaults (`get_sec_filings(ticker='')`,
+        `whiteboard_read(section='')`, `schedule_research(reason='')`,
+        `save_trading_chart(overlays=None)`). Rejecting on the schema's list
+        would newly block those calls, and `whiteboard_read` omitting `section`
+        is a legitimate read of the desk's own scratchpad.
+
+        Binding instead means we intercept exactly the calls that were going to
+        die anyway, and change nothing else.
+
+        Returns None when the question does not apply — no local implementation
+        (remote/schema-only tools cannot raise a local TypeError) or a callable
+        that cannot be introspected.
+        """
+        func = self.tools.get(func_name)
+        if func is None:
+            return None
+        try:
+            sig = inspect.signature(func)
+        except (TypeError, ValueError):
+            return None
+        try:
+            sig.bind(**kwargs)
+            return None
+        except TypeError:
+            pass
+        return sorted(
+            name
+            for name, p in sig.parameters.items()
+            if p.default is inspect.Parameter.empty
+            and p.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            and name not in kwargs
+        )
 
     def _filter_kwargs_to_schema(
         self, func_name: str, kwargs: dict
@@ -539,36 +653,59 @@ class ToolRegistry:
                     len(_dropped_keys),
                     [k[:60] for k in _dropped_keys],
                 )
-                _props, _required = self._schema_params(func_name)
-                _missing = sorted(_required - set(kwargs))
-                if _missing:
-                    # Dropping noise left a required field unset. Hand the model
-                    # the schema instead of failing on a TypeError it cannot
-                    # interpret — a bare error just gets retried verbatim.
-                    self._log_usage(
-                        func_name or "unknown", agent_name, ticker, cycle_id,
-                        False, 0,
-                        f"Malformed arguments: missing {_missing}",
+
+            # Required-field check, for EVERY call — not just the ones that also
+            # carried junk. This block used to be nested under `if _dropped_keys`,
+            # so it only ever fired when the model sent an undeclared key as well.
+            # A plain omission skipped the check entirely and died inside
+            # `func(**kwargs)` as a raw `TypeError: ... missing 1 required
+            # positional argument`, which the model cannot act on and simply
+            # retries verbatim.
+            #
+            # Two triggers, deliberately different. `_unbindable_params` is the
+            # strict one: the call physically cannot execute, so intercepting it
+            # costs nothing and replaces a guaranteed TypeError. The schema's
+            # `required` list is used only where it already was — alongside
+            # dropped keys — because it over-declares (see _unbindable_params)
+            # and promoting it to a standalone gate would block working calls.
+            _props, _required = self._schema_params(func_name)
+            _unbindable = self._unbindable_params(func_name, kwargs)
+            _missing = _unbindable or (
+                sorted(_required - set(kwargs)) if _dropped_keys else []
+            )
+            if _missing:
+                # Hand the model the schema instead of a TypeError it cannot
+                # interpret — a bare error just gets retried unchanged.
+                self._log_usage(
+                    func_name or "unknown", agent_name, ticker, cycle_id,
+                    False, 0,
+                    f"Malformed arguments: missing {_missing}",
+                )
+                if _dropped_keys:
+                    _cause = (
+                        f", and {len(_dropped_keys)} argument(s) were not part of "
+                        f"this tool's schema. This usually means the JSON was not "
+                        f"escaped correctly — check that quotes inside string values "
+                        f"are escaped and that arrays are closed"
                     )
-                    return {
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "name": func_name,
-                        "content": json.dumps(
-                            {
-                                "error": (
-                                    f"Malformed tool arguments. Required field(s) {_missing} "
-                                    f"were missing, and {len(_dropped_keys)} argument(s) were not "
-                                    f"part of this tool's schema. This usually means the JSON was "
-                                    f"not escaped correctly — check that quotes inside string "
-                                    f"values are escaped and that arrays are closed."
-                                ),
-                                "expected_arguments": sorted(_props),
-                                "required_arguments": sorted(_required),
-                                "hint": "Re-issue the call with valid JSON matching the schema above.",
-                            }
-                        ),
-                    }
+                else:
+                    _cause = " and must be supplied"
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": func_name,
+                    "content": json.dumps(
+                        {
+                            "error": (
+                                f"Malformed tool arguments. Required field(s) "
+                                f"{_missing} were missing{_cause}."
+                            ),
+                            "expected_arguments": sorted(_props),
+                            "required_arguments": sorted(_required),
+                            "hint": "Re-issue the call with valid JSON matching the schema above.",
+                        }
+                    ),
+                }
 
             # Update the parsed arguments representation
             arguments_json = json.dumps(kwargs)
