@@ -16,6 +16,64 @@ logger = logging.getLogger(__name__)
 # CLI use). Off by default — services must not mix model text into their logs.
 _STREAM_STDOUT = os.environ.get("LAZYCAT_STREAM_STDOUT", "").lower() in ("1", "true", "yes")
 
+#: How much of a malformed argument string to quote back to the model. Enough
+#: to locate the break, not enough to re-flood the context with the payload it
+#: just emitted.
+_MALFORMED_ARGS_ECHO_CHARS = 240
+
+
+def decode_tool_arguments(raw: Any) -> tuple[dict, str | None]:
+    """Decode a tool call's `arguments`. Returns `(arguments, error_or_None)`.
+
+    WHY THIS IS NOT `except: arguments = {}`
+    ----------------------------------------
+    A model that emits a large tool payload sometimes truncates it or escapes
+    it wrongly. The old code caught `JSONDecodeError` and substituted `{}`,
+    which meant a 40-second generation was thrown away and the tool ran with
+    NO arguments — so the model got back whatever the tool says about missing
+    required fields, with nothing pointing at the real cause.
+
+    Measured: trading-service `cycle-v3-1785792600`, the quant analyst's
+    `emit_structured_output` call arrived as `{}` and was rejected with
+    "'data' is required and must be an object". The model had produced the
+    data; only the JSON was malformed. It could not tell, so it could not fix
+    it, and the run was lost.
+
+    An EMPTY or missing argument string is NOT an error — a zero-argument tool
+    legitimately sends `""`, `"{}"` or nothing at all. Only a non-empty string
+    that fails to parse is a defect, and only that returns an error.
+    """
+    if raw is None:
+        return {}, None
+    if isinstance(raw, dict):
+        return raw, None
+    if not isinstance(raw, str):
+        return {}, (
+            f"Tool arguments must be a JSON object, got {type(raw).__name__}."
+        )
+
+    text = raw.strip()
+    if not text:
+        return {}, None
+    try:
+        decoded = json.loads(text)
+    except (ValueError, TypeError) as e:
+        return {}, (
+            f"Your tool arguments were not valid JSON and could not be "
+            f"decoded ({e}). The call was NOT executed. Nothing was lost — "
+            f"re-send the SAME call with correctly escaped JSON. You sent "
+            f"{len(text)} characters starting: "
+            f"{text[:_MALFORMED_ARGS_ECHO_CHARS]!r}"
+        )
+    if isinstance(decoded, dict):
+        return decoded, None
+    # A bare list/string/number parses fine but is not an argument mapping.
+    return {}, (
+        f"Tool arguments must be a JSON object (e.g. {{\"ticker\": \"AAPL\"}}), "
+        f"got a {type(decoded).__name__}. The call was NOT executed."
+    )
+
+
 class ToolLoopDetector:
     """Detects and breaks tool call loops.
 
@@ -219,12 +277,19 @@ class AgentHarness:
                         status = data.get("status")
                         tool_payload = data.get("tool") or data.get("toolCall", {})
                         func_name = tool_payload.get("name", "")
-                        try:
-                            arguments = tool_payload.get("args") or tool_payload.get("arguments", {})
-                            if isinstance(arguments, str):
-                                arguments = json.loads(arguments)
-                        except Exception:
-                            arguments = {}
+                        # Prism already executed this one, so we cannot refuse
+                        # it — but a silent `{}` here strips the args off the
+                        # telemetry row and makes a malformed-payload defect
+                        # look like a tool that takes no arguments.
+                        arguments, arg_error = decode_tool_arguments(
+                            tool_payload.get("args") or tool_payload.get("arguments")
+                        )
+                        if arg_error:
+                            logger.warning(
+                                f"[{self.agent.name}] Prism-internal {func_name} "
+                                f"had undecodable arguments; telemetry will "
+                                f"record none: {arg_error.splitlines()[0]}"
+                            )
                         
                         if status == "calling":
                             # Prism announces the call before executing it, so
@@ -285,24 +350,31 @@ class AgentHarness:
                 if "function" in tc:
                     func = tc.get("function", {})
                     func_name = func.get("name", "")
-                    try:
-                        arguments = json.loads(func.get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        arguments = {}
+                    arguments, arg_error = decode_tool_arguments(func.get("arguments"))
                 else:
                     func_name = tc.get("name", "")
-                    arguments = tc.get("arguments") or tc.get("args") or {}
-                    if isinstance(arguments, str):
-                        try:
-                            arguments = json.loads(arguments)
-                        except json.JSONDecodeError:
-                            arguments = {}
-                
+                    # `or` (not `is None`) preserves the original fallthrough:
+                    # an empty `arguments` defers to `args`.
+                    raw_arguments = tc.get("arguments") or tc.get("args")
+                    arguments, arg_error = decode_tool_arguments(raw_arguments)
+
                 logger.info(f"[{self.agent.name}] Executing tool: {func_name}")
                 elapsed_ms = 0
-                
+
+                # Malformed arguments: tell the model, do NOT run the tool with
+                # `{}`. Running it anyway produces a misleading "required field
+                # missing" rejection that hides the real defect, and burns the
+                # turn — see decode_tool_arguments().
+                if arg_error is not None:
+                    logger.warning(
+                        f"[{self.agent.name}] Malformed arguments for "
+                        f"{func_name}: {arg_error.splitlines()[0]}"
+                    )
+                    result = {"error": arg_error, "is_error": True}
+                    was_blocked = False
+                    self.loop_detector.record_call(func_name, arguments, failed=True)
                 # Check for human-in-the-loop pauses
-                if func_name in ("ask_user_question", "request_plan_approval"):
+                elif func_name in ("ask_user_question", "request_plan_approval"):
                     result = await self._handle_pausing_tool(func_name, arguments)
                     was_blocked = False
                 else:
