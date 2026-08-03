@@ -510,6 +510,7 @@ class PrismClient:
         project: str = "vllm-trading-bot",
         core_tools_locked: bool = False,
         thinking_default: bool | None = None,
+        policies: list[dict] | None = None,
     ) -> str:
         """Register a custom agent in Prism, or update it if it already exists.
         Returns the custom agent ID (e.g. 'CUSTOM_BEAR_MACRO_SENTIMENT_T2_AGENT').
@@ -575,6 +576,27 @@ class PrismClient:
                 # set pass core_tools_locked=True.
                 "coreToolsLocked": core_tools_locked,
             }
+            if policies:
+                # Per-agent tool policy rules, each
+                # `{"tool": <exact name>, "decision": "DENY"|"APPROVE"|
+                #   "ASK_USER", "name": <label>}`.
+                #
+                # This is the ONLY tool restriction on a custom agent that
+                # actually holds. `availableTools` does not: prism's
+                # AgentPersonaRegistry.registerCustom() copies availableTools
+                # out of the Mongo doc but NOT coreToolsLocked, so the
+                # resolver's `persona?.coreToolsLocked ?? true` defaults a
+                # custom agent to LOCKED and force-adds every CORE_AGENTIC /
+                # system tool on top of the list we registered — which is how
+                # trading-service's v3 analysts reached execute_command,
+                # write_file and query_datastore despite an explicit whitelist.
+                #
+                # A DENY policy survives that: AutoApprovalEngine evaluates
+                # policies BEFORE the tier system and before full-auto, and
+                # documents DENY as "terminal rejection — never downgraded to
+                # an approval prompt". Since these agents run auto_approve=True,
+                # a DENY rule is the only thing that can stop a call.
+                payload["policies"] = policies
             if thinking_default is not None:
                 # Per-agent <think> default; an explicit thinkingEnabled on a
                 # request always wins over this.
