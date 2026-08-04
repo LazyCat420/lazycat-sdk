@@ -319,6 +319,13 @@ class AgentHarness:
                                     elapsed_ms = int((time.time() - _t0) * 1000) if _t0 else 0
                                     self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
                                 except Exception as hook_err:
+                                    # Hooks are observational and must not kill a run —
+                                    # EXCEPT when the hook explicitly asks to abort
+                                    # (guard exceptions set abort_agent_run=True, e.g.
+                                    # doom-loop detectors). Swallowing those made every
+                                    # caller-side loop guard a silent no-op.
+                                    if getattr(hook_err, "abort_agent_run", False):
+                                        raise
                                     logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
                     elif event_type == "usage_update":
                         usage = data.get("usage")
@@ -442,6 +449,9 @@ class AgentHarness:
                     try:
                         self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
                     except Exception as hook_err:
+                        # Same abort contract as the prism-internal tool site above.
+                        if getattr(hook_err, "abort_agent_run", False):
+                            raise
                         logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
                 
                 # 5. Add result to history (truncate oversized payloads to prevent context overflow)
