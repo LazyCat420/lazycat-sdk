@@ -166,9 +166,26 @@ class PrismClient:
         self._last_config_fetch = 0.0
         logger.info("[PrismClient] Kill switch RESET")
 
-    def _prepare_messages(self, messages: list[dict], system_prompt: str) -> list[dict]:
-        """Prepends system prompt and dummy user message if system prompt is not already present."""
+    def _prepare_messages(
+        self,
+        messages: list[dict],
+        system_prompt: str,
+        inline_system_prompt: bool = True,
+    ) -> list[dict]:
+        """Prepends system prompt and dummy user message if system prompt is not already present.
+
+        inline_system_prompt=False skips the inlined copy entirely. Every
+        /agent payload we build ALSO carries the prompt as `systemPrompt`,
+        and prism's context clamp counts the messages array and
+        `systemPrompt` as two separate budget categories — so inlining bills
+        the same text twice. Measured 2026-08-03 against an 8K-window model:
+        3,082 duplicated tokens on a single chat request. Opt out on any
+        caller tight enough on context to care; prism reads the payload
+        field either way.
+        """
         new_messages = list(messages)
+        if not inline_system_prompt:
+            return new_messages
         if system_prompt and not any(m.get("role") == "system" for m in new_messages):
             new_messages.insert(0, {"role": "system", "content": system_prompt})
             if len(new_messages) > 1 and new_messages[1].get("role") == "user":
@@ -297,6 +314,10 @@ class PrismClient:
         session_id: str | None = None,
         auto_approve: bool = True,
         thinking_enabled: bool | None = None,
+        min_p: float | None = None,
+        disabled_tools: list[str] | None = None,
+        workspace_enabled: bool | None = None,
+        inline_system_prompt: bool = True,
     ) -> Any:
         """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled.
 
@@ -304,6 +325,25 @@ class PrismClient:
         local models on agent sessions); pass False on interactive paths where
         a user is watching the stream — the <think> block is most of the
         latency on Qwen-class models.
+
+        min_p: pass 0.0 on any path that may hit a vLLM box running
+        speculative decoding. 0.0 is vLLM's OWN default — not a tuning
+        choice. Prism's ParameterRegistry gives minP an `agentDefault` of
+        0.05, and vLLM refuses any min_p > 0 when speculative decoding is
+        enabled ("The min_p and logit_bias sampling parameters are not yet
+        supported with speculative decoding"). That refusal arrives AFTER a
+        200 header, mid-stream, so prism sees an empty stream rather than an
+        error and the caller gets silence. Sending an explicit 0 pre-empts
+        the agentDefault (prism only fills keys that are undefined/null — a
+        None here re-triggers 0.05). The default stays None so existing
+        callers keep prism's sampling unchanged — at temperature > 0 a
+        min_p switch is a real behaviour change, not a no-op.
+
+        disabled_tools: a denylist of tool names. Prism only honours it when
+        the payload carries NO `enabledTools` (AgenticToolResolver Mode 2 is
+        gated on that), so passing this suppresses the enabledTools key.
+
+        workspace_enabled: False drops the Core Workspace tool domain.
         """
         
         if self._kill_switch_armed:
@@ -347,11 +387,13 @@ class PrismClient:
  
         # Prepend system prompt and dummy user message to align system message rewrite in prism-service.
         # This prevents double system prompt errors on Qwen/vLLM.
-        new_messages = self._prepare_messages(messages, system_prompt)
- 
+        new_messages = self._prepare_messages(
+            messages, system_prompt, inline_system_prompt=inline_system_prompt
+        )
+
         # Resolve provider instance for local models to bypass load-balancer single-instance bug in Prism
         resolved_provider = await self._resolve_provider_instance(model, provider)
- 
+
         payload = {
             "provider": resolved_provider,
             "model": model,
@@ -371,8 +413,16 @@ class PrismClient:
             payload["maxIterations"] = max_iterations
         if thinking_enabled is not None:
             payload["thinkingEnabled"] = thinking_enabled
+        if min_p is not None:
+            payload["minP"] = min_p
+        if workspace_enabled is not None:
+            payload["workspaceEnabled"] = workspace_enabled
 
-        if tools:
+        if disabled_tools:
+            # Mode 2 in prism's AgenticToolResolver: the denylist is read only
+            # when `enabledTools` is absent, so these are mutually exclusive.
+            payload["disabledTools"] = disabled_tools
+        elif tools:
             enabled_tools = []
             for t in tools:
                 if "function" in t:
@@ -635,16 +685,26 @@ class PrismClient:
         project: str,
         username: str,
         is_new: bool,
-        enable_thinking: bool,
+        enable_thinking: bool | None,
         tools: list[dict] | None = None,
         is_qwen_model: bool = False,
         agentic_mode: bool = True,
         provider: str = "vllm",
+        min_p: float | None = None,
+        disabled_tools: list[str] | None = None,
+        workspace_enabled: bool | None = None,
+        inline_system_prompt: bool = True,
     ) -> tuple[dict, str, dict]:
-        """Returns (payload, url, headers) formatted for Prism /agent streaming."""
+        """Returns (payload, url, headers) formatted for Prism /agent streaming.
+
+        See `call_agent` for what min_p / disabled_tools / workspace_enabled /
+        inline_system_prompt do — the semantics are identical on both paths.
+        """
         # Prepend system prompt and dummy user message to align system message rewrite in prism-service.
         # This prevents double system prompt errors on Qwen/vLLM.
-        new_messages = self._prepare_messages(messages, system_prompt)
+        new_messages = self._prepare_messages(
+            messages, system_prompt, inline_system_prompt=inline_system_prompt
+        )
 
         payload: dict[str, Any] = {
             "provider": provider,
@@ -660,10 +720,22 @@ class PrismClient:
             "agenticLoopEnabled": agentic_mode,
             "systemPrompt": system_prompt[:15000],
         }
-        if is_qwen_model:
+        # `thinkingEnabled` used to ship only when the caller also set
+        # is_qwen_model, which trading-client never did — so an explicit
+        # enable_thinking=False was silently dropped and local models
+        # reasoned anyway. Honour the flag whenever it was actually given;
+        # None still defers to the gateway default.
+        if enable_thinking is not None:
             payload["thinkingEnabled"] = enable_thinking
+        if min_p is not None:
+            payload["minP"] = min_p
+        if workspace_enabled is not None:
+            payload["workspaceEnabled"] = workspace_enabled
 
-        if tools and agentic_mode:
+        if disabled_tools and agentic_mode:
+            # Mutually exclusive with enabledTools — see call_agent.
+            payload["disabledTools"] = disabled_tools
+        elif tools and agentic_mode:
             enabled_tools = []
             for t in tools:
                 if isinstance(t, dict):
@@ -699,14 +771,23 @@ class PrismClient:
         agent_name: str,
         project: str = "",
         username: str = "agent_runner",
-        enable_thinking: bool = False,
+        enable_thinking: bool | None = None,
         tools: list[dict] | None = None,
         is_qwen_model: bool = False,
         agentic_mode: bool = True,
         agentContext: dict | None = None,
         provider: str = "vllm",
+        min_p: float | None = None,
+        disabled_tools: list[str] | None = None,
+        workspace_enabled: bool | None = None,
+        inline_system_prompt: bool = True,
     ):
-        """High-level wrapper to stream Prism /agent response."""
+        """High-level wrapper to stream Prism /agent response.
+
+        enable_thinking defaults to None (defer to the gateway) rather than
+        False, so callers that never set it keep their existing behaviour now
+        that the flag is no longer gated behind is_qwen_model.
+        """
         
         if self._kill_switch_armed:
             raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
@@ -735,6 +816,10 @@ class PrismClient:
             is_qwen_model=is_qwen_model,
             agentic_mode=agentic_mode,
             provider=resolved_provider,
+            min_p=min_p,
+            disabled_tools=disabled_tools,
+            workspace_enabled=workspace_enabled,
+            inline_system_prompt=inline_system_prompt,
         )
         if agentContext:
             payload["agentContext"] = agentContext
