@@ -217,6 +217,12 @@ class AgentHarness:
         # total_tokens sums input+output(+reasoning) across all loop iterations.
         self.last_usage: dict = {}
         self.total_tokens: int = 0
+        # Model identity, filled from the stream's "done" event. This is
+        # prism's SERVER-side resolved model — not an echo of the request —
+        # so it survives silent gateway-side model swaps that the requested
+        # model name would misattribute.
+        self.last_model: str | None = None
+        self.last_provider: str | None = None
 
     async def run(self, user_input: str | None = None) -> str:
         """Run the agent loop until it completes or reaches max iterations."""
@@ -318,6 +324,11 @@ class AgentHarness:
                         usage = data.get("usage")
                         if isinstance(usage, dict):
                             request_usage = usage
+                    elif event_type == "done":
+                        if data.get("model"):
+                            self.last_model = data["model"]
+                        if data.get("provider"):
+                            self.last_provider = data["provider"]
                     elif event_type == "error":
                         logger.error(f"Prism stream error: {data.get('message')}")
                     elif "text" in data and not event_type:
