@@ -694,11 +694,16 @@ class PrismClient:
         disabled_tools: list[str] | None = None,
         workspace_enabled: bool | None = None,
         inline_system_prompt: bool = True,
+        auto_approve: bool | None = None,
     ) -> tuple[dict, str, dict]:
         """Returns (payload, url, headers) formatted for Prism /agent streaming.
 
         See `call_agent` for what min_p / disabled_tools / workspace_enabled /
         inline_system_prompt do — the semantics are identical on both paths.
+        auto_approve mirrors call_agent's field: without it a tiered tool call
+        sits in prism's approval queue until it times out as USER_REJECTED,
+        which no streaming caller of this SDK can answer. None keeps the
+        gateway default.
         """
         # Prepend system prompt and dummy user message to align system message rewrite in prism-service.
         # This prevents double system prompt errors on Qwen/vLLM.
@@ -731,6 +736,8 @@ class PrismClient:
             payload["minP"] = min_p
         if workspace_enabled is not None:
             payload["workspaceEnabled"] = workspace_enabled
+        if auto_approve is not None:
+            payload["autoApprove"] = auto_approve
 
         if disabled_tools and agentic_mode:
             # Mutually exclusive with enabledTools — see call_agent.
@@ -781,6 +788,7 @@ class PrismClient:
         disabled_tools: list[str] | None = None,
         workspace_enabled: bool | None = None,
         inline_system_prompt: bool = True,
+        auto_approve: bool | None = None,
     ):
         """High-level wrapper to stream Prism /agent response.
 
@@ -820,6 +828,7 @@ class PrismClient:
             disabled_tools=disabled_tools,
             workspace_enabled=workspace_enabled,
             inline_system_prompt=inline_system_prompt,
+            auto_approve=auto_approve,
         )
         if agentContext:
             payload["agentContext"] = agentContext
