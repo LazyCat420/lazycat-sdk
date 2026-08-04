@@ -141,6 +141,75 @@ def _scan_balanced(text: str) -> str | None:
     return None
 
 
+def _object_starts(text: str, *, string_aware: bool) -> list[int]:
+    """Indices of every '{' that opens at brace depth 0.
+
+    A depth-0 opener is the only honest definition of "top-level", and unlike
+    a skip-on-success cursor it does not depend on the object parsing. That
+    distinction is the whole point: when the outer object is malformed, a
+    success-gated cursor never advances, so the scan walks into the interior
+    and the caller ends up holding a nested fragment.
+
+    `string_aware` tracks quotes so braces inside string literals don't move
+    the depth. It is the correct reading and is tried first; the naive count
+    is kept as a second pass for prose whose quotes are unbalanced *before*
+    the JSON (`He said "hi. {"a": 1}`), where quote tracking would swallow the
+    real opener.
+    """
+    starts: list[int] = []
+    depth = 0
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if string_aware:
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+        if ch == "{":
+            if depth == 0:
+                starts.append(i)
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+    return starts
+
+
+def _balanced_end(text: str, start: int, *, string_aware: bool) -> int | None:
+    """Index of the '}' closing the object opened at `start`, or None."""
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if string_aware:
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
 def _salvage_truncated(text: str) -> str:
     """Recover a usable JSON span from output that was cut off mid-structure.
 
@@ -229,32 +298,40 @@ def parse_json_response(
     if markdown_candidates:
         return _pick(markdown_candidates)
 
-    # 2. Balanced brace scan. Only TOP-LEVEL objects may become candidates:
-    # once a span parses, every opening brace inside it is skipped. Without
-    # this, a valid nested response ends up returning its last inner sub-dict
-    # (the outer object parses first, but the scan keeps walking into it and
-    # [-1] picks the innermost fragment) — silently dropping the real payload.
-    brace_candidates = []
-    skip_until = -1
-    for start_idx in range(len(cleaned)):
-        if cleaned[start_idx] != "{" or start_idx < skip_until:
-            continue
-        depth = 0
-        for end_idx in range(start_idx, len(cleaned)):
-            if cleaned[end_idx] == "{":
-                depth += 1
-            elif cleaned[end_idx] == "}":
-                depth -= 1
-            if depth == 0:
-                candidate = cleaned[start_idx : end_idx + 1]
-                try:
-                    parsed = json.loads(candidate)
-                    if isinstance(parsed, dict):
-                        brace_candidates.append(parsed)
-                        skip_until = end_idx + 1
-                except json.JSONDecodeError:
-                    pass  # This opening brace didn't work, try next
-                break
+    # 2. Balanced brace scan over TOP-LEVEL objects only.
+    #
+    # "Top-level" is decided by BRACE DEPTH, never by whether a span parsed.
+    # The previous cursor only skipped an object's interior once that object
+    # parsed, so a malformed outer object left the cursor parked and the scan
+    # walked straight into it — collecting every inner sub-object, with
+    # `_pick`'s [-1] then handing back the LAST nested fragment as if it were
+    # the payload. Measured in trading-service on 2026-08-04: a fundamental
+    # report whose outer object did not parse came back as its `metrics`
+    # block alone (17 keys, none of them required), and two quant reports
+    # came back as a single entry from their trailing `overlays` array. All
+    # three read downstream as "the model produced a useless artifact" rather
+    # than "we failed to parse it", so the caller's repair pass never ran.
+    #
+    # A nested fragment is never a better answer than no answer: returning {}
+    # lets the caller repair, retry, or fail honestly.
+    brace_candidates: list[dict] = []
+    for string_aware in (True, False):
+        for start_idx in _object_starts(cleaned, string_aware=string_aware):
+            end_idx = _balanced_end(cleaned, start_idx, string_aware=string_aware)
+            if end_idx is None:
+                continue
+            try:
+                parsed = json.loads(cleaned[start_idx : end_idx + 1])
+            except json.JSONDecodeError:
+                continue  # This opening brace didn't work, try next
+            if isinstance(parsed, dict):
+                brace_candidates.append(parsed)
+        # The passes are tried in order and never mixed: a naive depth count
+        # can mistake a nested object for a top-level one when the enclosing
+        # object holds a '}' inside a string, which is the exact failure the
+        # string-aware pass exists to prevent.
+        if brace_candidates:
+            break
     if brace_candidates:
         return _pick(brace_candidates)
 

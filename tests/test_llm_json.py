@@ -200,3 +200,62 @@ def test_strict_handles_prose_appended_after_the_object():
 
 def test_strict_parses_top_level_array():
     assert parse_json_strict('[{"a": 1}, {"b": 2}]') == [{"a": 1}, {"b": 2}]
+
+
+# ── A malformed outer object must never yield one of its nested fragments ──
+# Regression: trading-service, 2026-08-04. A fundamental_report whose outer
+# object did not parse came back as its trailing `metrics` block alone, which
+# is valid JSON and so passed straight to schema validation as a "collapsed
+# artifact" — the caller's repair pass never fired. Two quant reports failed
+# the same way, returning a single entry from their trailing `overlays` array.
+
+_NESTED = (
+    '{\n'
+    '  "summary": "TSM at 18x fwd",\n'
+    '  "thesis_direction": "BULLISH",\n'
+    '  "confidence": 72,\n'
+    '  "metrics": {"pe_ratio": 21.4, "roe": 0.31}\n'
+    '}'
+)
+
+
+def test_valid_nested_object_still_returns_the_outer_payload():
+    got = parse_json_response(_NESTED)
+    assert got["summary"] == "TSM at 18x fwd"
+    assert got["metrics"] == {"pe_ratio": 21.4, "roe": 0.31}
+
+
+@pytest.mark.parametrize(
+    "name,text",
+    [
+        # cut off at the output-token ceiling, losing only the final brace
+        ("truncated", _NESTED[: _NESTED.rfind("}")]),
+        # a trailing comma before the close
+        ("trailing_comma", _NESTED[: _NESTED.rfind("}")] + ",\n}"),
+        # an unescaped quote in the prose field
+        ("unescaped_quote", _NESTED.replace("18x fwd", '"18x" fwd', 1)),
+    ],
+)
+def test_malformed_outer_object_returns_empty_not_a_fragment(name, text):
+    got = parse_json_response(text)
+    assert got == {}, f"{name}: leaked a nested fragment {sorted(got)}"
+
+
+def test_two_top_level_objects_still_picks_the_last():
+    assert parse_json_response('{"draft": 1}\n{"final": 2}') == {"final": 2}
+
+
+def test_brace_inside_a_string_does_not_expose_the_inner_object():
+    # The naive depth count reads the '}' in "x { y }" as closing the outer
+    # object, which would make {"c": 1} look top-level. String-awareness must
+    # win, and the outer payload must come back whole.
+    assert parse_json_response('{"a": "x { y }", "b": {"c": 1}}') == {
+        "a": "x { y }",
+        "b": {"c": 1},
+    }
+
+
+def test_unbalanced_quote_before_the_json_still_parses():
+    # Quote tracking would swallow the real opener here, so the naive pass has
+    # to stay as a second attempt.
+    assert parse_json_response('He said "hi. {"a": 1}') == {"a": 1}
