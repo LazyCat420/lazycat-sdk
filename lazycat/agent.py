@@ -167,6 +167,7 @@ class BaseAgent:
         username: str = "lazycat-sdk",
         llm_client: Any = None,
         auto_approve: bool = True,
+        min_p: float | None = None,
     ):
         self.name = name
         self.system_prompt = system_prompt
@@ -179,6 +180,22 @@ class BaseAgent:
         self.tools: list[dict] = []
         self.llm_client = llm_client or prism_client
         self.auto_approve = auto_approve
+        # None defers to prism's ParameterRegistry, which carries
+        # `minP: agentDefault 0.05` — and vLLM REFUSES any min_p > 0 when
+        # speculative decoding is on ("The min_p and logit_bias sampling
+        # parameters are not yet supported with speculative decoding").
+        #
+        # The refusal is invisible to the caller: vLLM answers HTTP 200 and
+        # then raises inside the stream generator, so prism receives an empty
+        # stream rather than an error and reports a successful call with no
+        # content. `call_agent` has always accepted min_p; the harness simply
+        # never forwarded it, so no BaseAgent user could reach the fix.
+        #
+        # Measured 2026-08-06 on the Jetson (Qwen3.6-35B-AWQ, spec decoding),
+        # one variable changed, same prompt: default -> 0 chars;
+        # min_p=0.0 -> 2,534 chars. Pass 0.0 on any path that may hit a vLLM
+        # box; 0.0 is vLLM's own default, so it is not a tuning choice.
+        self.min_p = min_p
         
     def add_tool(self, tool_schema: dict):
         self.tools.append(tool_schema)
@@ -258,6 +275,9 @@ class AgentHarness:
                 auto_approve=self.agent.auto_approve,
                 max_iterations=self.max_iterations,
                 thinking_enabled=self.thinking_enabled,
+                # See BaseAgent.min_p: None keeps prism's 0.05 agentDefault,
+                # which a spec-decoding vLLM box answers with an empty stream.
+                min_p=self.agent.min_p,
             )
             
             content = ""
