@@ -14,7 +14,7 @@ from .llm_json import (
 # importing the package stays cheap and the top-level surface stays readable.
 
 # Keep in sync with pyproject.toml [project] version
-__version__ = "0.3.11"
+__version__ = "0.3.12"
 
 __all__ = [
     "prism_client",

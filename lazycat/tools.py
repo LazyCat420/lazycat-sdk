@@ -7,6 +7,29 @@ from lazycat.config import config
 
 logger = logging.getLogger(__name__)
 
+#: Every MCP namespace a tool call may arrive under, longest-first.
+#:
+#: The service behind these tools was renamed `lazy-tool-service` ->
+#: `lazy-agent-service` (2026-08-07). The prefix is minted by PRISM from its MCP
+#: server registration name, so which spelling arrives depends on which
+#: registration the caller's scope is connected to — and during the migration
+#: both are live. A missed strip is silent: the name is forwarded verbatim to
+#: `/execute/<name>`, which answers "Unknown tool" and reads to the model as a
+#: missing capability rather than a routing bug.
+_MCP_PREFIXES = (
+    "mcp__lazy-agent-service__",
+    "mcp__lazy-tool-service__",
+)
+
+
+def strip_mcp_prefix(tool_name: str) -> str:
+    """Namespaced tool name -> bare name. Bare names pass through unchanged."""
+    name = tool_name or ""
+    for prefix in _MCP_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
 class ToolExecutor:
     """Standardized HTTP client for executing tools via lazy-tool-service."""
 
@@ -41,11 +64,7 @@ class ToolExecutor:
         cannot match the session and FAILS OPEN.
         """
 
-        # Remove the MCP prefix if it exists before routing
-        mcp_prefix = "mcp__lazy-tool-service__"
-        clean_name = tool_name
-        if clean_name.startswith(mcp_prefix):
-            clean_name = clean_name[len(mcp_prefix):]
+        clean_name = strip_mcp_prefix(tool_name)
 
         client = await self._get_client()
         target_url = f"{self.url}/execute/{clean_name}"
