@@ -194,6 +194,64 @@ class ToolRegistry:
         # effective) instead of moving it to the end.
         self._schema_index: dict[str, int] = {}
 
+    def _reindex(self) -> None:
+        """Rebuild `_schema_index` from `schemas`, which is the authority."""
+        self._schema_index = {}
+        for i, s in enumerate(self.schemas):
+            n = (s.get("function") or {}).get("name")
+            if n and n not in self._schema_index:
+                self._schema_index[n] = i
+
+    def _index_of(self, name: str) -> int | None:
+        """The position of `name`'s schema, verified against `schemas`.
+
+        `_schema_index` is a second copy of information `schemas` already
+        carries, so any code that edits `schemas` directly desynchronises it.
+        That is not hypothetical: a caller removing a tool with
+
+            registry.schemas = [s for s in registry.schemas if ...]
+
+        leaves a stale entry pointing past the end (IndexError on the next
+        registration of that name) and shifts every later tool's position by
+        one — which is the WORSE half, because a stale-but-in-range index
+        silently overwrites an UNRELATED tool's schema. Verify the slot before
+        trusting it and rebuild when it does not match.
+        """
+        at = self._schema_index.get(name)
+        if at is None:
+            return None
+        if at < len(self.schemas):
+            found = (self.schemas[at].get("function") or {}).get("name")
+            if found == name:
+                return at
+        self._reindex()
+        return self._schema_index.get(name)
+
+    def unregister(self, name: str) -> bool:
+        """Remove a tool, its schema and its metadata. Returns whether it existed.
+
+        Exists so callers never have to reach into `schemas`/`tools`/`_meta`
+        by hand — the index cannot be kept correct from outside, and the three
+        structures have to move together. Mainly for test teardown, where a
+        tool registered by one test must not leak into the next.
+        """
+        existed = False
+        if name in self.tools:
+            del self.tools[name]
+            existed = True
+        if name in self._meta:
+            del self._meta[name]
+            existed = True
+        before = len(self.schemas)
+        self.schemas = [
+            s for s in self.schemas
+            if (s.get("function") or {}).get("name") != name
+        ]
+        if len(self.schemas) != before:
+            existed = True
+        self._reindex()
+        return existed
+
     def _put_schema(self, name: str, schema: dict, *, source: str) -> None:
         """Insert or replace the single schema for `name`.
 
@@ -205,7 +263,7 @@ class ToolRegistry:
         """
         if not name:
             return
-        existing_at = self._schema_index.get(name)
+        existing_at = self._index_of(name)
         if existing_at is None:
             self._schema_index[name] = len(self.schemas)
             self.schemas.append(schema)
