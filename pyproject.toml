@@ -24,3 +24,6 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
+
+[tool.setuptools.packages.find]
+include = ["lazycat*"]
