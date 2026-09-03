@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import logging
 import uuid
 from typing import Any
@@ -11,6 +12,30 @@ from lazycat.sse import iter_sse_lines
 import json
 
 logger = logging.getLogger(__name__)
+
+bench_harness_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("bench_harness", default=None)
+bench_run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("bench_run_id", default=None)
+bench_task_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("bench_task", default=None)
+
+def set_bench_context(run_id: str | None, harness: str = "trading-cycle", task: str | None = None) -> None:
+    """Set benchmark context for DGX Spark monitoring (run_id, harness, task)."""
+    bench_run_id_var.set(run_id)
+    bench_harness_var.set(harness)
+    bench_task_var.set(task)
+
+def get_bench_context() -> dict[str, str | None]:
+    """Retrieve the current benchmark context values."""
+    return {
+        "run_id": bench_run_id_var.get(),
+        "harness": bench_harness_var.get(),
+        "task": bench_task_var.get(),
+    }
+
+def clear_bench_context() -> None:
+    """Clear active benchmark context."""
+    bench_run_id_var.set(None)
+    bench_harness_var.set(None)
+    bench_task_var.set(None)
 
 class LLMStreamWrapper:
     def __init__(self, response: httpx.Response, is_openai: bool = False):
@@ -318,6 +343,9 @@ class PrismClient:
         disabled_tools: list[str] | None = None,
         workspace_enabled: bool | None = None,
         inline_system_prompt: bool = True,
+        bench_harness: str | None = None,
+        bench_run_id: str | None = None,
+        bench_task: str | None = None,
     ) -> Any:
         """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled.
 
@@ -348,6 +376,10 @@ class PrismClient:
         
         if self._kill_switch_armed:
             raise asyncio.CancelledError("lazycat-sdk kill switch is armed")
+
+        effective_run_id = bench_run_id or bench_run_id_var.get()
+        effective_harness = bench_harness or bench_harness_var.get() or "trading-cycle"
+        effective_task = bench_task or bench_task_var.get()
             
         if not config.PRISM_ENABLED:
             return await self._call_vllm_direct(
@@ -357,7 +389,10 @@ class PrismClient:
                 tools=tools,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                stream=stream
+                stream=stream,
+                bench_harness=effective_harness,
+                bench_run_id=effective_run_id,
+                bench_task=effective_task,
             )
 
         client = await self._get_client()
@@ -409,6 +444,9 @@ class PrismClient:
             "functionCallingEnabled": False,
             "autoApprove": auto_approve,
         }
+        if effective_run_id:
+            payload["user"] = effective_run_id
+
         if max_iterations is not None:
             payload["maxIterations"] = max_iterations
         if thinking_enabled is not None:
@@ -441,6 +479,11 @@ class PrismClient:
             "x-project": project,
             "x-username": username,
         }
+        if effective_run_id:
+            headers["X-Bench-Harness"] = effective_harness
+            headers["X-Bench-Run"] = effective_run_id
+            if effective_task:
+                headers["X-Bench-Task"] = effective_task
 
         logger.debug(f"[INSTRUMENTATION] prism.call_agent attempting to connect to: {url}")
         try:
@@ -470,8 +513,15 @@ class PrismClient:
         max_tokens: int = 8192,
         temperature: float = 0.0,
         stream: bool = False,
+        bench_harness: str | None = None,
+        bench_run_id: str | None = None,
+        bench_task: str | None = None,
     ) -> Any:
         client = await self._get_client()
+
+        effective_run_id = bench_run_id or bench_run_id_var.get()
+        effective_harness = bench_harness or bench_harness_var.get() or "trading-cycle"
+        effective_task = bench_task or bench_task_var.get()
         
         is_qwen = "qwen" in model.lower()
         vllm_base = config.JETSON_VLLM_URL if is_qwen else config.DGX_SPARK_VLLM_URL
@@ -495,6 +545,8 @@ class PrismClient:
             "temperature": temperature,
             "stream": stream,
         }
+        if effective_run_id:
+            payload["user"] = effective_run_id
         
         if tools:
             openai_tools = []
@@ -515,6 +567,12 @@ class PrismClient:
                 payload["tool_choice"] = "auto"
                 
         headers = {"Content-Type": "application/json"}
+        if effective_run_id:
+            headers["X-Bench-Harness"] = effective_harness
+            headers["X-Bench-Run"] = effective_run_id
+            if effective_task:
+                headers["X-Bench-Task"] = effective_task
+
         logger.info(f"[SDK direct-vLLM] completions endpoint: {url} (stream={stream})")
         
         try:

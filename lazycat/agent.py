@@ -215,6 +215,7 @@ class AgentHarness:
         on_tool_result: Callable[[str, dict, Any, bool, int], None] | None = None,
         max_tool_result_chars: int = 50_000,
         thinking_enabled: bool | None = None,
+        bench_task: str | None = None,
     ):
         self.agent = agent
         self.session = session
@@ -222,6 +223,7 @@ class AgentHarness:
         # None = provider/gateway default; False suppresses <think> blocks on
         # models that support toggling (prism honors an explicit false).
         self.thinking_enabled = thinking_enabled
+        self.bench_task = bench_task
         # Hook: called before each tool execution with (tool_name, arguments).
         # Return None to proceed, or a string to inject as the tool result
         self.on_tool_call = on_tool_call
@@ -278,6 +280,7 @@ class AgentHarness:
                 # See BaseAgent.min_p: None keeps prism's 0.05 agentDefault,
                 # which a spec-decoding vLLM box answers with an empty stream.
                 min_p=self.agent.min_p,
+                bench_task=self.bench_task or self.agent.name,
             )
             
             content = ""
