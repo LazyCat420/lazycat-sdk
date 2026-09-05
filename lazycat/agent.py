@@ -281,6 +281,7 @@ class AgentHarness:
                 # which a spec-decoding vLLM box answers with an empty stream.
                 min_p=self.agent.min_p,
                 bench_task=self.bench_task or self.agent.name,
+                inline_system_prompt=False,
             )
             
             content = ""

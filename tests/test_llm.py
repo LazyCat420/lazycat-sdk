@@ -17,7 +17,8 @@ async def test_prism_client_sends_correct_shape():
             messages=[{"role": "user", "content": "hello"}],
             system_prompt="system test",
             agent_name="test_agent",
-            tools=[{"type": "function", "function": {"name": "test_tool"}}]
+            tools=[{"type": "function", "function": {"name": "test_tool"}}],
+            inline_system_prompt=True,
         )
         
         # Verify the call shape

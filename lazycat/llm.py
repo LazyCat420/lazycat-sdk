@@ -342,7 +342,7 @@ class PrismClient:
         min_p: float | None = None,
         disabled_tools: list[str] | None = None,
         workspace_enabled: bool | None = None,
-        inline_system_prompt: bool = True,
+        inline_system_prompt: bool = False,
         bench_harness: str | None = None,
         bench_run_id: str | None = None,
         bench_task: str | None = None,
