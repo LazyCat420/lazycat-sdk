@@ -46,6 +46,7 @@ __all__ = [
     "resilient_call",
     "set_failure_emitter",
     "NON_RETRYABLE_EXCEPTION_NAMES",
+    "RETRYABLE_EXCEPTION_NAMES",
 ]
 
 
@@ -54,6 +55,25 @@ __all__ = [
 # Exception class names that must never be retried, by name so applications can
 # register their own without this module importing them.
 NON_RETRYABLE_EXCEPTION_NAMES: set[str] = set()
+
+# The mirror. Exception class names an application declares RETRYABLE, so a
+# fault it knows to be transient is not classified FATAL by the fall-through
+# below just because it arrives as a plain RuntimeError.
+#
+# WHY IT EXISTS (measured 2026-09-05 in trading-service). A provider stream
+# stall reached this function by two routes and got two different budgets: on
+# the first token it surfaced as an httpx/asyncio error (TRANSIENT, 5
+# attempts); on iteration 3 of prism's server-side agentic loop the SAME stall
+# came back as an assistant MESSAGE, the caller detected the marker and raised
+# a RuntimeError, and it fell through to FATAL — ending the run at attempt 2.
+# GOOG's bull agent died that way after 1,238 s while both of its siblings
+# succeeded on the same stage of the same cycle.
+#
+# Matched on `type(exc).__name__`, exactly like the non-retryable set, so
+# applications can register without this module importing them. When a name is
+# in BOTH sets the non-retryable one wins: retrying something an application
+# declared un-retryable is the worse error.
+RETRYABLE_EXCEPTION_NAMES: set[str] = set()
 
 _failure_emitter: Callable | None = None
 
@@ -191,8 +211,13 @@ def classify_exception(exc: Exception) -> FailureType:
         return FailureType.TRANSIENT
 
     # ── Application-registered non-retryables → FATAL ──
+    # Checked BEFORE the retryable set: a name in both resolves to the safe side.
     if type(exc).__name__ in NON_RETRYABLE_EXCEPTION_NAMES:
         return FailureType.FATAL
+
+    # ── Application-registered retryables → TRANSIENT ──
+    if type(exc).__name__ in RETRYABLE_EXCEPTION_NAMES:
+        return FailureType.TRANSIENT
 
     # ── JSON/parse errors → DEGRADED (LLM output was malformed) ──
     if isinstance(exc, (json.JSONDecodeError, KeyError)):

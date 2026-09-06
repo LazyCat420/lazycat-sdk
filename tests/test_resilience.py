@@ -354,3 +354,91 @@ def test_resilience_config_is_introspectable():
 
     assert f._resilience_config["retries"] == 7
     assert f._resilience_config["backoff"] == "linear"
+
+
+# ── Applications may register a type as RETRYABLE, symmetrically ───────────
+#
+# WHY (measured 2026-09-05 in trading-service, cycle-v3-1788646388). A provider
+# stream stall reached `classify_exception` by two different routes and got two
+# different retry budgets:
+#
+#   * a stall on the FIRST token surfaced as an httpx/asyncio error ->
+#     TRANSIENT -> the full 5 attempts;
+#   * the SAME stall on iteration 3 of prism's server-side agentic loop came
+#     back as an assistant MESSAGE ("⚠️ **Error:** The model provider
+#     encountered an error on iteration 3: Provider stream stalled: no data
+#     received for 300s"). The caller detects that marker and raises a
+#     RuntimeError, which falls through to FATAL, and `_should_stop` ends the
+#     run at attempt 2 of 5.
+#
+# GOOG's bull agent died that way after 1,238 seconds: two 300 s stalls, and
+# "All 5 attempts failed ... [2 attempts, last_type=fatal]". Its two siblings
+# succeeded on the same stage of the same cycle.
+#
+# `NON_RETRYABLE_EXCEPTION_NAMES` already lets an application say "never retry
+# this". The reverse could not be said at all: the only RuntimeError carve-out
+# is a substring match on "offline"/"no models found" inside this module, which
+# an application cannot extend without editing the SDK.
+
+
+class TestRetryableExceptionNames:
+    def test_an_unregistered_runtimeerror_is_still_fatal(self):
+        """The default must not change for any other caller."""
+        assert classify_exception(RuntimeError("something else")) is FailureType.FATAL
+
+    def test_a_registered_name_becomes_transient(self):
+        from lazycat.resilience import RETRYABLE_EXCEPTION_NAMES
+
+        class MyTransientError(RuntimeError):
+            pass
+
+        assert classify_exception(MyTransientError("x")) is FailureType.FATAL
+        RETRYABLE_EXCEPTION_NAMES.add("MyTransientError")
+        try:
+            assert classify_exception(MyTransientError("x")) is FailureType.TRANSIENT
+        finally:
+            RETRYABLE_EXCEPTION_NAMES.discard("MyTransientError")
+
+        assert classify_exception(MyTransientError("x")) is FailureType.FATAL
+
+    def test_non_retryable_wins_when_a_name_is_in_both_sets(self):
+        """A contradiction must resolve to the SAFE side. Retrying something an
+        application declared un-retryable is the worse error."""
+        from lazycat.resilience import (
+            NON_RETRYABLE_EXCEPTION_NAMES,
+            RETRYABLE_EXCEPTION_NAMES,
+        )
+
+        class Confused(RuntimeError):
+            pass
+
+        NON_RETRYABLE_EXCEPTION_NAMES.add("Confused")
+        RETRYABLE_EXCEPTION_NAMES.add("Confused")
+        try:
+            assert classify_exception(Confused("x")) is FailureType.FATAL
+        finally:
+            NON_RETRYABLE_EXCEPTION_NAMES.discard("Confused")
+            RETRYABLE_EXCEPTION_NAMES.discard("Confused")
+
+    def test_registration_survives_subclassing_by_exact_name_only(self):
+        """Matched on the type's own __name__, like the non-retryable set —
+        a subclass is a different class and must register itself."""
+        from lazycat.resilience import RETRYABLE_EXCEPTION_NAMES
+
+        class Base(RuntimeError):
+            pass
+
+        class Derived(Base):
+            pass
+
+        RETRYABLE_EXCEPTION_NAMES.add("Base")
+        try:
+            assert classify_exception(Base("x")) is FailureType.TRANSIENT
+            assert classify_exception(Derived("x")) is FailureType.FATAL
+        finally:
+            RETRYABLE_EXCEPTION_NAMES.discard("Base")
+
+    def test_the_set_is_exported(self):
+        import lazycat.resilience as mod
+
+        assert "RETRYABLE_EXCEPTION_NAMES" in mod.__all__
