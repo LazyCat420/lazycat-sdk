@@ -40,7 +40,7 @@ import json
 
 import pytest
 
-from lazycat.llm import LLMStreamWrapper, text_from_message
+from lazycat.llm import LLMStreamWrapper, PrismClient, text_from_message
 
 
 def _msg(**kw):
@@ -140,3 +140,54 @@ class TestStreaming:
 
     def test_an_empty_delta_yields_nothing(self):
         assert self._chunks([self._line({}), "data: [DONE]"]) == []
+
+
+class TestTheCallSiteActuallyUsesIt:
+    """Testing the helper proves nothing about the code path that ships.
+
+    ⚠ Written after a sabotage run: reverting `_call_vllm_direct` to
+    `msg.get("content") or ""` left every test in TestNonStreaming GREEN,
+    because they call `text_from_message` directly. A helper can be perfect and
+    unreferenced. These drive the real method.
+    """
+
+    @staticmethod
+    def _run(message: dict):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        c = PrismClient.__new__(PrismClient)
+
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value={
+            "choices": [{"message": message, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 21, "completion_tokens": 64},
+        })
+        client = MagicMock()
+        client.post = AsyncMock(return_value=resp)
+
+        with patch.object(PrismClient, "_get_client",
+                          AsyncMock(return_value=client)):
+            return asyncio.run(c._call_vllm_direct(
+                model="nemotron35",
+                messages=[{"role": "user", "content": "hi"}],
+                system_prompt="sys",
+            ))
+
+    def test_the_shipping_path_recovers_a_reasoning_reply(self):
+        out = self._run({"role": "assistant", "content": None,
+                         "reasoning": "Here's a thinking process: ..."})
+        assert out.text == "Here's a thinking process: ...", (
+            "_call_vllm_direct still reads `content` directly — the helper is "
+            "not wired into the path that actually runs"
+        )
+
+    def test_the_shipping_path_leaves_a_normal_reply_alone(self):
+        out = self._run({"role": "assistant", "content": "the answer",
+                         "reasoning": "the thinking"})
+        assert out.text == "the answer"
+
+    def test_the_shipping_path_returns_empty_when_there_is_nothing(self):
+        out = self._run({"role": "assistant", "content": None})
+        assert out.text == ""
