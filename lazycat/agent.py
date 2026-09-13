@@ -236,6 +236,15 @@ class AgentHarness:
         # total_tokens sums input+output(+reasoning) across all loop iterations.
         self.last_usage: dict = {}
         self.total_tokens: int = 0
+        # ADDITIVE (2026-09-12): the OUTPUT side, which the fused total_tokens
+        # cannot separate and last_usage only holds for the FINAL request.
+        # completion_tokens sums outputTokens+reasoningOutputTokens across the
+        # whole loop; usage_requests counts the requests that actually REPORTED
+        # a usage block, so a RECORDED zero (an all-zero block marks a
+        # TRUNCATED generation, not a cheap one) stays distinguishable from
+        # "never reported" — both of which otherwise read as 0.
+        self.completion_tokens: int = 0
+        self.usage_requests: int = 0
         # Model identity, filled from the stream's "done" event. This is
         # prism's SERVER-side resolved model — not an echo of the request —
         # so it survives silent gateway-side model swaps that the requested
@@ -372,11 +381,15 @@ class AgentHarness:
 
             if request_usage:
                 self.last_usage = request_usage
-                self.total_tokens += (
-                    int(request_usage.get("inputTokens") or 0)
-                    + int(request_usage.get("outputTokens") or 0)
+                _completion = (
+                    int(request_usage.get("outputTokens") or 0)
                     + int(request_usage.get("reasoningOutputTokens") or 0)
                 )
+                self.total_tokens += (
+                    int(request_usage.get("inputTokens") or 0) + _completion
+                )
+                self.completion_tokens += _completion
+                self.usage_requests += 1
             
             
             # 2. Add LLM response to history
