@@ -37,6 +37,46 @@ def clear_bench_context() -> None:
     bench_harness_var.set(None)
     bench_task_var.set(None)
 
+#: Field names a reasoning model may use INSTEAD of `content`. vLLM's OpenAI
+#: layer sends `reasoning`; the OpenAI spelling is `reasoning_content`.
+_REASONING_FIELDS = ("reasoning", "reasoning_content")
+
+
+def text_from_message(msg: dict) -> str:
+    """The assistant text, falling back to a reasoning field when empty.
+
+    MEASURED on the live jetson engine, model `nemotron35`:
+
+        content    None
+        reasoning  "Here's a thinking process: ..."
+        finish_reason: length      usage: completion_tokens=64
+
+    A reasoning model puts its generation in `reasoning` and leaves `content`
+    null. Reading only `content` returned "" and the caller logged
+    `EMPTY RESPONSE ... raw=''` — 87 times across 32 cycles in one week, 53 of
+    them this model. The completion is NOT empty (64 completion tokens), so the
+    zero-usage truncation guard cannot see it either.
+
+    `content` always wins, so a normal model is completely unaffected; a
+    non-string reasoning block is ignored rather than stringified.
+
+    ⚠ This is a repair, not a cure. `finish_reason: "length"` means the model
+    spent its whole budget thinking and never reached an answer, so the text
+    recovered here is a truncated thought. Surfacing it makes "reasoned for 64
+    tokens and ran out" diagnosable, where `raw=''` was not.
+    """
+    if not isinstance(msg, dict):
+        return ""
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        return content
+    for field in _REASONING_FIELDS:
+        value = msg.get(field)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 class LLMStreamWrapper:
     def __init__(self, response: httpx.Response, is_openai: bool = False):
         self.response = response
@@ -100,8 +140,20 @@ class LLMStreamWrapper:
                 choice = choices[0]
                 delta = choice.get("delta", {})
 
-                if "content" in delta and delta["content"]:
-                    prism_data = {"type": "chunk", "content": delta["content"]}
+                # A reasoning model streams its generation in `reasoning`
+                # deltas. Forwarding only `content` meant the consumer received
+                # NOTHING while the engine was happily generating, and its
+                # watchdog fired `Provider stream stalled: no data received for
+                # 300s` — 44 times in seven days, retried up to 5x, which is
+                # ~25 minutes burned per agent. Same root cause as the empty
+                # non-streaming replies; two very different-looking symptoms.
+                # `content` wins so a normal model emits exactly once.
+                chunk = delta.get("content")
+                if not (isinstance(chunk, str) and chunk):
+                    chunk = next((delta[f] for f in _REASONING_FIELDS
+                                  if isinstance(delta.get(f), str) and delta[f]), None)
+                if chunk:
+                    prism_data = {"type": "chunk", "content": chunk}
                     yield f"data: {json.dumps(prism_data)}"
 
                 if "tool_calls" in delta and delta["tool_calls"]:
@@ -587,7 +639,7 @@ class PrismClient:
                 res_data = r.json()
                 choice = res_data["choices"][0]
                 msg = choice.get("message", {})
-                text = msg.get("content") or ""
+                text = text_from_message(msg)
                 
                 tool_calls = []
                 if "tool_calls" in msg and msg["tool_calls"]:
