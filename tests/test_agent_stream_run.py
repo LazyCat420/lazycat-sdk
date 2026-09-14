@@ -16,7 +16,7 @@ from lazycat.session import ConversationSession
 
 
 def _harness():
-    agent = BaseAgent(name="t", system_prompt="sys")
+    agent = BaseAgent(model="test-model", name="t", system_prompt="sys")
     return AgentHarness(agent=agent, session=ConversationSession(session_id="s"))
 
 

@@ -51,7 +51,7 @@ async def test_call_agent_does_not_duplicate_system_prompt_in_messages():
 
 @pytest.mark.asyncio
 async def test_agent_harness_passes_inline_system_prompt_false():
-    agent = BaseAgent(name="test_agent", system_prompt="You are a test agent")
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="You are a test agent")
     session = ConversationSession(session_id="test_dedup")
     session.add_user_message("evaluate")
     harness = AgentHarness(agent=agent, session=session)

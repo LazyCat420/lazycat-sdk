@@ -98,7 +98,7 @@ async def test_a_malformed_call_never_reaches_the_executor():
     from lazycat.agent import AgentHarness, BaseAgent
     from lazycat.session import ConversationSession
 
-    agent = BaseAgent(name="test_agent", system_prompt="test")
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="test")
     agent.add_tool({"name": "emit_structured_output", "description": "dummy"})
     harness = AgentHarness(agent=agent, session=ConversationSession(session_id="t1"))
 

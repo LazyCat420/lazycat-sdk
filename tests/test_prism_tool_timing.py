@@ -22,7 +22,7 @@ from lazycat.session import ConversationSession
 
 
 def _harness(on_tool_result):
-    agent = BaseAgent(name="t", system_prompt="sys")
+    agent = BaseAgent(model="test-model", name="t", system_prompt="sys")
     return AgentHarness(
         agent=agent,
         session=ConversationSession(session_id="s"),

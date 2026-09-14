@@ -296,6 +296,10 @@ class PrismClient:
         instance (e.g., 'vllm-2') holds the requested model.
         Falls back to base_provider if not found.
         """
+        # A caller that discovered an endpoint/model pair owns that route.
+        # A model-only cache cannot distinguish the same model on two boxes.
+        if base_provider:
+            return base_provider
         if not model:
             return base_provider
 

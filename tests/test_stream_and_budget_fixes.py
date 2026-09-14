@@ -96,7 +96,7 @@ async def test_flush_on_done_without_finish_reason():
 
 @pytest.mark.asyncio
 async def test_harness_sends_max_iterations_over_the_wire():
-    agent = BaseAgent(name="test_agent", system_prompt="You are a test agent")
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="You are a test agent")
     session = ConversationSession(session_id="test_mi")
     harness = AgentHarness(agent=agent, session=session, max_iterations=5)
 

@@ -6,7 +6,7 @@ from lazycat.session import ConversationSession
 
 @pytest.mark.asyncio
 async def test_agent_harness_terminates_cleanly():
-    agent = BaseAgent(name="test_agent", system_prompt="You are a test agent")
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="You are a test agent")
     session = ConversationSession(session_id="test_123")
     harness = AgentHarness(agent=agent, session=session)
     
@@ -40,7 +40,7 @@ async def test_agent_harness_captures_resolved_model_from_done_event():
     """The done event carries prism's SERVER-side resolved model — the value a
     per-model scorecard must attribute to, since it survives gateway-side model
     swaps the requested name knows nothing about."""
-    agent = BaseAgent(name="test_agent", system_prompt="You are a test agent")
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="You are a test agent")
     session = ConversationSession(session_id="test_model")
     harness = AgentHarness(agent=agent, session=session)
 
@@ -68,7 +68,7 @@ async def test_agent_harness_captures_resolved_model_from_done_event():
 async def test_done_event_without_model_keeps_previous_value():
     """A done frame with a null/absent model must not clobber the last known
     resolution — partial frames happen on error paths."""
-    agent = BaseAgent(name="test_agent", system_prompt="You are a test agent")
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="You are a test agent")
     session = ConversationSession(session_id="test_model_keep")
     harness = AgentHarness(agent=agent, session=session)
     harness.last_model = "prior-model"
@@ -92,7 +92,7 @@ async def test_done_event_without_model_keeps_previous_value():
 
 @pytest.mark.asyncio
 async def test_agent_harness_tool_call():
-    agent = BaseAgent(name="test_agent", system_prompt="You are a test agent")
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="You are a test agent")
     # Add a mock tool to the agent
     agent.add_tool({"name": "dummy_tool", "description": "dummy"})
     

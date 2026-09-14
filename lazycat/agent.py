@@ -159,7 +159,7 @@ class BaseAgent:
         self,
         name: str,
         system_prompt: str,
-        model: str = "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit",
+        model: str,
         temperature: float = 0.0,
         max_tokens: int = 8192,
         provider: str = "vllm",
@@ -377,21 +377,17 @@ class AgentHarness:
 
                 print() # flush newline after stream completes
             finally:
+                # The last usage snapshot is cumulative for this stream. Record
+                # it once, including when cancellation interrupts generation.
+                if request_usage:
+                    self.last_usage = request_usage
+                    completion = (int(request_usage.get("outputTokens") or 0)
+                                  + int(request_usage.get("reasoningOutputTokens") or 0))
+                    self.total_tokens += int(request_usage.get("inputTokens") or 0) + completion
+                    self.completion_tokens += completion
+                    self.usage_requests += 1
                 await resp.aclose()
 
-            if request_usage:
-                self.last_usage = request_usage
-                _completion = (
-                    int(request_usage.get("outputTokens") or 0)
-                    + int(request_usage.get("reasoningOutputTokens") or 0)
-                )
-                self.total_tokens += (
-                    int(request_usage.get("inputTokens") or 0) + _completion
-                )
-                self.completion_tokens += _completion
-                self.usage_requests += 1
-            
-            
             # 2. Add LLM response to history
             self.session.add_assistant_message(content, tool_calls)
             
