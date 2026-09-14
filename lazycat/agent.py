@@ -245,6 +245,9 @@ class AgentHarness:
         # "never reported" — both of which otherwise read as 0.
         self.completion_tokens: int = 0
         self.usage_requests: int = 0
+        self.total_requests: int = 0
+        self.prompt_tokens: int = 0
+        self.reasoning_tokens: int = 0
         # Model identity, filled from the stream's "done" event. This is
         # prism's SERVER-side resolved model — not an echo of the request —
         # so it survives silent gateway-side model swaps that the requested
@@ -270,6 +273,7 @@ class AgentHarness:
             # agentic loop runs SERVER-side (prism forces agenticLoopEnabled),
             # so without maxIterations in the payload the caller's per-role
             # turn budget never binds — prism used its own default cap.
+            self.total_requests += 1
             resp = await self.agent.llm_client.call_agent(
                 model=self.agent.model,
                 messages=self.session.get_messages(),
@@ -386,6 +390,8 @@ class AgentHarness:
                     self.total_tokens += int(request_usage.get("inputTokens") or 0) + completion
                     self.completion_tokens += completion
                     self.usage_requests += 1
+                    self.prompt_tokens += int(request_usage.get("inputTokens") or 0)
+                    self.reasoning_tokens += int(request_usage.get("reasoningOutputTokens") or 0)
                 await resp.aclose()
 
             # 2. Add LLM response to history

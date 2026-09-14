@@ -38,4 +38,6 @@ async def test_cancellation_keeps_last_cumulative_usage_snapshot_once():
     assert harness.completion_tokens == 20
     assert harness.total_tokens == 120
     assert harness.usage_requests == 1
+    assert harness.total_requests == 1
+    assert harness.prompt_tokens == 100
     response.aclose.assert_awaited_once()
