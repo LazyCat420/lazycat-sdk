@@ -15,6 +15,30 @@ async def test_explicit_provider_wins_over_same_model_on_another_box():
     assert await client._resolve_provider_instance("same-model", "vllm-2") == "vllm-2"
 
 
+@pytest.mark.asyncio
+async def test_default_provider_resolves_via_model_cache():
+    """When provider/base_provider is omitted or None, dynamic resolution via cache/config takes effect."""
+    client = PrismClient()
+    client._model_to_provider_cache["GLM-5.3-Flash-EXL3"] = "vllm-2"
+    assert await client._resolve_provider_instance("GLM-5.3-Flash-EXL3") == "vllm-2"
+    assert await client._resolve_provider_instance("GLM-5.3-Flash-EXL3", None) == "vllm-2"
+
+
+@pytest.mark.asyncio
+async def test_default_provider_falls_back_to_vllm_if_unknown():
+    client = PrismClient()
+    assert await client._resolve_provider_instance("unknown-model", None) == "vllm"
+
+
+def test_signatures_default_provider_to_none():
+    import inspect
+    sig_call = inspect.signature(PrismClient.call_agent)
+    assert sig_call.parameters["provider"].default is None
+    sig_stream = inspect.signature(PrismClient.agent_chat_stream)
+    assert sig_stream.parameters["provider"].default is None
+
+
+
 def test_harness_has_no_hardcoded_model_default():
     with pytest.raises(TypeError):
         BaseAgent(name="test", system_prompt="test")

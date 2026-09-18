@@ -290,18 +290,18 @@ class PrismClient:
 
         return is_up
 
-    async def _resolve_provider_instance(self, model: str, base_provider: str = "vllm") -> str:
+    async def _resolve_provider_instance(self, model: str, base_provider: str | None = None) -> str:
         """
         Query /config?includeLocal=true from Prism to discover which specific provider
         instance (e.g., 'vllm-2') holds the requested model.
         Falls back to base_provider if not found.
         """
         # A caller that discovered an endpoint/model pair owns that route.
-        # A model-only cache cannot distinguish the same model on two boxes.
-        if base_provider:
+        # An explicitly provided base_provider (not None) takes precedence.
+        if base_provider is not None:
             return base_provider
         if not model:
-            return base_provider
+            return "vllm"
 
         # Check cache first
         if model in self._model_to_provider_cache:
@@ -332,8 +332,9 @@ class PrismClient:
         except Exception as e:
             logger.warning(f"[PRISM] Failed to auto-resolve provider for model '{model}': {e}")
 
-        resolved = self._model_to_provider_cache.get(model, base_provider)
-        logger.info(f"[PRISM] Resolved model '{model}' to provider instance '{resolved}' (base: '{base_provider}')")
+        fallback = base_provider or "vllm"
+        resolved = self._model_to_provider_cache.get(model, fallback)
+        logger.info(f"[PRISM] Resolved model '{model}' to provider instance '{resolved}' (fallback: '{fallback}')")
         return resolved
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -387,7 +388,7 @@ class PrismClient:
         tools: list[dict] | None = None,
         max_tokens: int = 8192,
         temperature: float = 0.0,
-        provider: str = "vllm",
+        provider: str | None = None,
         project: str = "default-project",
         username: str = "lazycat-sdk",
         stream: bool = False,
@@ -897,7 +898,7 @@ class PrismClient:
         is_qwen_model: bool = False,
         agentic_mode: bool = True,
         agentContext: dict | None = None,
-        provider: str = "vllm",
+        provider: str | None = None,
         min_p: float | None = None,
         disabled_tools: list[str] | None = None,
         workspace_enabled: bool | None = None,
