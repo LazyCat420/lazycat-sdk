@@ -19,6 +19,8 @@ async def test_explicit_provider_wins_over_same_model_on_another_box():
 async def test_default_provider_resolves_via_model_cache():
     """When provider/base_provider is omitted or None, dynamic resolution via cache/config takes effect."""
     client = PrismClient()
+    import time
+    client._last_config_fetch = time.time()
     client._model_to_provider_cache["GLM-5.3-Flash-EXL3"] = "vllm-2"
     assert await client._resolve_provider_instance("GLM-5.3-Flash-EXL3") == "vllm-2"
     assert await client._resolve_provider_instance("GLM-5.3-Flash-EXL3", None) == "vllm-2"
@@ -27,6 +29,8 @@ async def test_default_provider_resolves_via_model_cache():
 @pytest.mark.asyncio
 async def test_default_provider_falls_back_to_vllm_if_unknown():
     client = PrismClient()
+    import time
+    client._last_config_fetch = time.time()
     assert await client._resolve_provider_instance("unknown-model", None) == "vllm"
 
 
@@ -65,3 +69,17 @@ async def test_cancellation_keeps_last_cumulative_usage_snapshot_once():
     assert harness.total_requests == 1
     assert harness.prompt_tokens == 100
     response.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_expired_discovery_replaces_moved_and_removed_models():
+    client = PrismClient()
+    client._model_to_provider_cache = {"moved": "old-endpoint", "removed": "old-endpoint"}
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"textToText": {"models": {"new-endpoint": [{"name": "moved"}]}}}
+    transport = MagicMock()
+    transport.get = AsyncMock(return_value=response)
+    client._get_client = AsyncMock(return_value=transport)
+    assert await client._resolve_provider_instance("moved") == "new-endpoint"
+    assert "removed" not in client._model_to_provider_cache
+    transport.get.assert_awaited_once()

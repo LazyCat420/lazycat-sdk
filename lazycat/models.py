@@ -9,10 +9,10 @@ class RunBudget(BaseModel):
     """Execution budget constraints matching docs/contracts/run-contract-v1.json."""
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
-    max_tokens: Optional[int] = Field(default=None, alias="maxTokens", ge=1, le=32768)
+    max_tokens: Optional[int] = Field(default=None, alias="maxTokens", ge=0, le=32768)
     max_tool_calls: Optional[int] = Field(default=None, alias="maxToolCalls", ge=0, le=50)
     max_retries: Optional[int] = Field(default=None, alias="maxRetries", ge=0, le=10)
-    max_duration_ms: Optional[int] = Field(default=None, alias="maxDurationMs", ge=1000, le=600000)
+    max_duration_ms: Optional[int] = Field(default=None, alias="maxDurationMs", ge=0, le=600000)
 
 
 class Message(BaseModel):

@@ -303,8 +303,8 @@ class PrismClient:
         if not model:
             return "vllm"
 
-        # Check cache first
-        if model in self._model_to_provider_cache:
+        import time
+        if time.time() - self._last_config_fetch <= 30 and model in self._model_to_provider_cache:
             return self._model_to_provider_cache[model]
 
         # Fetch config
@@ -323,11 +323,13 @@ class PrismClient:
                     data = response.json()
                     text_to_text = data.get("textToText", {})
                     models_map = text_to_text.get("models", {})
+                    refreshed_mapping = {}
                     for inst_id, model_list in models_map.items():
                         for m_info in model_list:
                             m_name = m_info.get("name")
                             if m_name:
-                                self._model_to_provider_cache[m_name] = inst_id
+                                refreshed_mapping[m_name] = inst_id
+                    self._model_to_provider_cache = refreshed_mapping
                     self._last_config_fetch = now
         except Exception as e:
             logger.warning(f"[PRISM] Failed to auto-resolve provider for model '{model}': {e}")
@@ -904,6 +906,7 @@ class PrismClient:
         workspace_enabled: bool | None = None,
         inline_system_prompt: bool = True,
         auto_approve: bool | None = None,
+        conversation_id: str | None = None,
     ):
         """High-level wrapper to stream Prism /agent response.
 
@@ -917,7 +920,7 @@ class PrismClient:
 
         group_key = f"chat-{agent_name}" if agent_name == "user_chat" else agent_name
         session_id, is_new = self._get_or_create_session(group_key)
-        conversation_id = str(uuid.uuid4())
+        conversation_id = conversation_id or str(uuid.uuid4())
 
         # Resolve provider instance for local models to bypass load-balancer single-instance bug in Prism
         resolved_provider = await self._resolve_provider_instance(model, provider)
@@ -948,6 +951,11 @@ class PrismClient:
         if agentContext:
             payload["agentContext"] = agentContext
 
+        from urllib.parse import urlsplit
+        endpoint = urlsplit(url)
+        logger.info("[PRISM] stream conversation=%s model=%s provider=%s endpoint=%s%s tools=%s max_output=%s",
+                    conversation_id, model, resolved_provider, endpoint.hostname, endpoint.path,
+                    len(tools or []), max_tokens)
         client = await self._get_client()
         try:
             async with client.stream("POST", url, json=payload, headers=headers, timeout=600.0) as response:

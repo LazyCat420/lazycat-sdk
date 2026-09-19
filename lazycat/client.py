@@ -74,6 +74,9 @@ class RuntimeClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        credential = os.environ.get("RUNTIME_API_TOKEN") or os.environ.get("RUNTIME_AUTH_SECRET") or os.environ.get("INTERNAL_EXECUTE_TOKEN")
+        if credential:
+            headers["x-runtime-token"] = credential
         if idempotency_key:
             headers["x-idempotency-key"] = idempotency_key
         return headers
@@ -148,44 +151,52 @@ class RuntimeClient:
                         status_code=resp.status_code
                     )
 
-                buffer = ""
-                async for chunk in resp.aiter_text():
-                    buffer += chunk
-                    while "\n\n" in buffer:
-                        block, buffer = buffer.split("\n\n", 1)
-                        for line in block.split("\n"):
-                            line = line.strip()
-                            if not line or not line.startswith("data:"):
-                                continue
-                            raw_payload = line[len("data:"):].strip()
-                            if raw_payload == "[DONE]":
-                                return
-
-                            try:
-                                event_dict = json.loads(raw_payload)
-                            except json.JSONDecodeError as jde:
-                                raise RunEventDecodeError(
-                                    f"Malformed JSON in SSE stream: {jde}",
-                                    details=raw_payload
-                                ) from jde
-
-                            if not isinstance(event_dict, dict):
-                                raise RunEventDecodeError(
-                                    f"SSE data payload must be a JSON object, got {type(event_dict).__name__}",
-                                    details=raw_payload
-                                )
-
-                            try:
-                                event = RunEvent.model_validate(event_dict)
-                            except ValidationError as ve:
-                                raise RunEventDecodeError(
-                                    f"SSE event failed contract validation: {ve}",
-                                    details=event_dict
-                                ) from ve
-
-                            yield event
+                data_lines = []
+                seen = set()
+                async for line in resp.aiter_lines():
+                    if line.startswith(":"):
+                        continue
+                    if line:
+                        if line.startswith("data:"):
+                            data_lines.append(line[5:].lstrip(" "))
+                        continue
+                    if not data_lines:
+                        continue
+                    raw_payload = "\n".join(data_lines)
+                    data_lines.clear()
+                    if raw_payload == "[DONE]":
+                        raise RunEventDecodeError("Stream ended without a terminal run outcome")
+                    try:
+                        event = RunEvent.model_validate(json.loads(raw_payload))
+                    except (json.JSONDecodeError, ValidationError) as exc:
+                        raise RunEventDecodeError("Invalid runtime SSE event", details=raw_payload) from exc
+                    if event.id in seen:
+                        continue
+                    seen.add(event.id)
+                    yield event
+                    if event.type in ("run.completed", "run.failed", "run.cancelled"):
+                        return
+                raise RunEventDecodeError("Runtime stream ended before a terminal run outcome")
         finally:
             if should_close:
+                await client.aclose()
+
+    async def submit_tool_result(self, run_id: str, call_id: str, *, result: Any,
+                                 authorization_receipt: dict, is_error: bool = False) -> dict:
+        """Return a real local observation using the runtime's scoped signed receipt."""
+        from urllib.parse import quote
+        client = self._get_http_client()
+        try:
+            resp = await client.post(
+                f"{self.base_url}/{quote(run_id, safe='')}/tools/{quote(call_id, safe='')}/result",
+                headers=self._get_headers(),
+                json={"result": result, "is_error": is_error, "authorization_receipt": authorization_receipt},
+            )
+            if resp.status_code != 200:
+                raise RuntimeClientError("Tool result rejected", status_code=resp.status_code)
+            return resp.json()
+        finally:
+            if self._external_client is None:
                 await client.aclose()
 
     async def get_run(self, run_id: str) -> RunResult:
