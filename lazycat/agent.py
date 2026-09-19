@@ -9,49 +9,21 @@ from lazycat.llm import prism_client
 from lazycat.tools import tool_executor
 from lazycat.session import ConversationSession
 from lazycat.sse import format_sse, iter_sse_json_lines, iter_sse_lines
+from lazycat.client import RunClient, RunClientError
+from lazycat.models import RunRequest, AgentProfile, StreamChunk, StreamToolCall, StreamToolExecution, StreamDone, StreamError, StreamUsage
 
 logger = logging.getLogger(__name__)
 
-# Set LAZYCAT_STREAM_STDOUT=1 to echo streamed tokens to stdout (interactive
-# CLI use). Off by default — services must not mix model text into their logs.
 _STREAM_STDOUT = os.environ.get("LAZYCAT_STREAM_STDOUT", "").lower() in ("1", "true", "yes")
-
-#: How much of a malformed argument string to quote back to the model. Enough
-#: to locate the break, not enough to re-flood the context with the payload it
-#: just emitted.
 _MALFORMED_ARGS_ECHO_CHARS = 240
 
-
 def decode_tool_arguments(raw: Any) -> tuple[dict, str | None]:
-    """Decode a tool call's `arguments`. Returns `(arguments, error_or_None)`.
-
-    WHY THIS IS NOT `except: arguments = {}`
-    ----------------------------------------
-    A model that emits a large tool payload sometimes truncates it or escapes
-    it wrongly. The old code caught `JSONDecodeError` and substituted `{}`,
-    which meant a 40-second generation was thrown away and the tool ran with
-    NO arguments — so the model got back whatever the tool says about missing
-    required fields, with nothing pointing at the real cause.
-
-    Measured: trading-service `cycle-v3-1785792600`, the quant analyst's
-    `emit_structured_output` call arrived as `{}` and was rejected with
-    "'data' is required and must be an object". The model had produced the
-    data; only the JSON was malformed. It could not tell, so it could not fix
-    it, and the run was lost.
-
-    An EMPTY or missing argument string is NOT an error — a zero-argument tool
-    legitimately sends `""`, `"{}"` or nothing at all. Only a non-empty string
-    that fails to parse is a defect, and only that returns an error.
-    """
     if raw is None:
         return {}, None
     if isinstance(raw, dict):
         return raw, None
     if not isinstance(raw, str):
-        return {}, (
-            f"Tool arguments must be a JSON object, got {type(raw).__name__}."
-        )
-
+        return {}, f"Tool arguments must be a JSON object, got {type(raw).__name__}."
     text = raw.strip()
     if not text:
         return {}, None
@@ -67,94 +39,39 @@ def decode_tool_arguments(raw: Any) -> tuple[dict, str | None]:
         )
     if isinstance(decoded, dict):
         return decoded, None
-    # A bare list/string/number parses fine but is not an argument mapping.
     return {}, (
         f"Tool arguments must be a JSON object (e.g. {{\"ticker\": \"AAPL\"}}), "
         f"got a {type(decoded).__name__}. The call was NOT executed."
     )
 
-
 class ToolLoopDetector:
-    """Detects and breaks tool call loops.
-
-    Tracks (tool_name, args_hash, status) history per session.
-    If the same combo fails N times, returns a stop injection message
-    instructing the agent to reason from what it already has.
-    """
-
     def __init__(self, max_identical_failures: int = 3, max_duplicate_queries: int = 2):
         self.max_identical_failures = max_identical_failures
         self.max_duplicate_queries = max_duplicate_queries
-        self._history: dict[str, int] = {}  # "tool:args_hash:failed" -> count
-        self._warning_issued: set[str] = set()  # keys that got a warning injection
-        self.escalation_triggered: bool = False  # True = agent persisted after warning
+        self._history: dict[str, int] = {}
+        self._warning_issued: set[str] = set()
+        self.escalation_triggered: bool = False
 
     def _make_key(self, tool_name: str, args: Any, failed: bool) -> str:
-        """Create a dedup key from tool name, args hash, and failure status."""
         args_str = json.dumps(args, sort_keys=True, default=str) if args else ""
         args_hash = hashlib.sha256(args_str.encode()).hexdigest()[:12]
         status = "failed" if failed else "ok"
         return f"{tool_name}:{args_hash}:{status}"
 
-    def record_call(
-        self, tool_name: str, args: Any, failed: bool
-    ) -> str | None:
-        """Record a tool call and check for loops.
-
-        Returns:
-            A stop injection message if a loop is detected, else None.
-        """
+    def record_call(self, tool_name: str, args: Any, failed: bool) -> str | None:
         key = self._make_key(tool_name, args, failed)
         self._history[key] = self._history.get(key, 0) + 1
-
-        # ── Failure loop detection ──
         if failed and self._history[key] >= self.max_identical_failures:
             if key in self._warning_issued:
                 self.escalation_triggered = True
-                logger.error(
-                    "[ToolLoopDetector] ESCALATION: %s persisted after warning (%d failures).",
-                    tool_name, self._history[key],
-                )
-                return (
-                    f"[SYSTEM OVERRIDE — ESCALATION] The tool '{tool_name}' has now failed "
-                    f"{self._history[key]} times. The previous warning was ignored. "
-                    f"You MUST stop calling this tool immediately and produce your "
-                    f"final artifact with the data you have. Mark missing data as "
-                    f"'DataGap: [description]'."
-                )
-
+                return f"[SYSTEM OVERRIDE — ESCALATION] The tool '{tool_name}' has now failed {self._history[key]} times. You MUST stop calling this tool immediately."
             self._warning_issued.add(key)
-            logger.warning(
-                "[ToolLoopDetector] Loop detected: %s failed %d times with same args",
-                tool_name,
-                self._history[key],
-            )
-            return (
-                f"[SYSTEM OVERRIDE] The tool '{tool_name}' has failed "
-                f"{self._history[key]} times with the same arguments. "
-                f"STOP calling this tool. Instead, reason from the data you "
-                f"already have and produce your final artifact. If critical "
-                f"data is missing, mark it as 'DataGap: [description]' in "
-                f"your output."
-            )
-
-        # ── Duplicate query detection (successful calls) ──
+            return f"[SYSTEM OVERRIDE] The tool '{tool_name}' has failed {self._history[key]} times with the same arguments. STOP calling this tool."
         if not failed and self._history[key] > self.max_duplicate_queries:
-            logger.warning(
-                "[ToolLoopDetector] Duplicate query: %s called %d times with same args (successful)",
-                tool_name, self._history[key],
-            )
-            return (
-                f"[SYSTEM NOTICE] You have already called '{tool_name}' with these "
-                f"exact arguments {self._history[key]} times and received the same data. "
-                f"Use the data you already have — do not re-request it."
-            )
-
+            return f"[SYSTEM NOTICE] You have already called '{tool_name}' with these exact arguments {self._history[key]} times. Use the data you already have."
         return None
 
 class BaseAgent:
-    """Base class for all LazyCat SDK agents."""
-    
     def __init__(
         self,
         name: str,
@@ -180,32 +97,12 @@ class BaseAgent:
         self.tools: list[dict] = []
         self.llm_client = llm_client or prism_client
         self.auto_approve = auto_approve
-        # None defers to prism's ParameterRegistry, which carries
-        # `minP: agentDefault 0.05` — and vLLM REFUSES any min_p > 0 when
-        # speculative decoding is on ("The min_p and logit_bias sampling
-        # parameters are not yet supported with speculative decoding").
-        #
-        # The refusal is invisible to the caller: vLLM answers HTTP 200 and
-        # then raises inside the stream generator, so prism receives an empty
-        # stream rather than an error and reports a successful call with no
-        # content. `call_agent` has always accepted min_p; the harness simply
-        # never forwarded it, so no BaseAgent user could reach the fix.
-        #
-        # Measured 2026-08-06 on the Jetson (Qwen3.6-35B-AWQ, spec decoding),
-        # one variable changed, same prompt: default -> 0 chars;
-        # min_p=0.0 -> 2,534 chars. Pass 0.0 on any path that may hit a vLLM
-        # box; 0.0 is vLLM's own default, so it is not a tuning choice.
         self.min_p = min_p
         
     def add_tool(self, tool_schema: dict):
         self.tools.append(tool_schema)
 
 class AgentHarness:
-    """Standardized tool-call loop.
-    
-    send message -> check for tool calls -> dispatch -> loop until done.
-    """
-    
     def __init__(
         self,
         agent: BaseAgent,
@@ -220,392 +117,114 @@ class AgentHarness:
         self.agent = agent
         self.session = session
         self.max_iterations = max_iterations
-        # None = provider/gateway default; False suppresses <think> blocks on
-        # models that support toggling (prism honors an explicit false).
         self.thinking_enabled = thinking_enabled
         self.bench_task = bench_task
-        # Hook: called before each tool execution with (tool_name, arguments).
-        # Return None to proceed, or a string to inject as the tool result
         self.on_tool_call = on_tool_call
-        # Hook: called after each tool execution with (tool_name, arguments, result, was_blocked).
         self.on_tool_result = on_tool_result
         self.max_tool_result_chars = max_tool_result_chars
         self.loop_detector = ToolLoopDetector(max_identical_failures=3)
-        # Token accounting, filled from the stream's cumulative usage_update
-        # events: last_usage is the final snapshot of the most recent request;
-        # total_tokens sums input+output(+reasoning) across all loop iterations.
         self.last_usage: dict = {}
         self.total_tokens: int = 0
-        # ADDITIVE (2026-09-12): the OUTPUT side, which the fused total_tokens
-        # cannot separate and last_usage only holds for the FINAL request.
-        # completion_tokens sums outputTokens+reasoningOutputTokens across the
-        # whole loop; usage_requests counts the requests that actually REPORTED
-        # a usage block, so a RECORDED zero (an all-zero block marks a
-        # TRUNCATED generation, not a cheap one) stays distinguishable from
-        # "never reported" — both of which otherwise read as 0.
         self.completion_tokens: int = 0
         self.usage_requests: int = 0
         self.total_requests: int = 0
         self.prompt_tokens: int = 0
         self.reasoning_tokens: int = 0
-        # Model identity, filled from the stream's "done" event. This is
-        # prism's SERVER-side resolved model — not an echo of the request —
-        # so it survives silent gateway-side model swaps that the requested
-        # model name would misattribute.
         self.last_model: str | None = None
         self.last_provider: str | None = None
+        
+        # New run client points to lazy-agent-service
+        # Default assumes it is running locally or accessible via LAZY_AGENT_SERVICE_URL
+        base_url = os.environ.get("LAZY_AGENT_SERVICE_URL", "http://lazy-agent-service:3000")
+        self.run_client = RunClient(
+            base_url=base_url,
+            project=self.agent.project,
+            username=self.agent.username
+        )
+
+    def _build_request(self) -> RunRequest:
+        profile = AgentProfile(
+            name=self.agent.name,
+            system_prompt=self.agent.system_prompt,
+            model=self.agent.model,
+            provider=self.agent.provider,
+            temperature=self.agent.temperature,
+            max_tokens=self.agent.max_tokens,
+            min_p=self.agent.min_p,
+            tools=self.agent.tools
+        )
+        return RunRequest(
+            profile=profile,
+            messages=self.session.get_messages(),
+            max_iterations=self.max_iterations,
+            auto_approve=self.agent.auto_approve,
+            thinking_enabled=self.thinking_enabled,
+            bench_task=self.bench_task
+        )
 
     async def run(self, user_input: str | None = None) -> str:
-        """Run the agent loop until it completes or reaches max iterations."""
+        """Run the agent loop via the shared run client instead of local loop."""
         if user_input:
             self.session.add_user_message(user_input)
             
-        iterations = 0
-        # func_name -> monotonic start of a prism-internal tool call, set on
-        # the "calling" event and consumed on "done"/"error". Per-run rather
-        # than per-instance so a reused harness cannot leak stale timings.
-        prism_tool_started: dict[str, float] = {}
-        while iterations < self.max_iterations:
-            iterations += 1
-            
-            # 1. Send messages to LLM
-            # max_iterations must go over the wire: on the prism path the
-            # agentic loop runs SERVER-side (prism forces agenticLoopEnabled),
-            # so without maxIterations in the payload the caller's per-role
-            # turn budget never binds — prism used its own default cap.
-            self.total_requests += 1
-            resp = await self.agent.llm_client.call_agent(
-                model=self.agent.model,
-                messages=self.session.get_messages(),
-                system_prompt=self.agent.system_prompt,
-                agent_name=self.agent.name,
-                project=self.agent.project,
-                username=self.agent.username,
-                max_tokens=self.agent.max_tokens,
-                temperature=self.agent.temperature,
-                tools=self.agent.tools if self.agent.tools else None,
-                provider=self.agent.provider,
-                stream=True,
-                session_id=self.session.session_id,
-                auto_approve=self.agent.auto_approve,
-                max_iterations=self.max_iterations,
-                thinking_enabled=self.thinking_enabled,
-                # See BaseAgent.min_p: None keeps prism's 0.05 agentDefault,
-                # which a spec-decoding vLLM box answers with an empty stream.
-                min_p=self.agent.min_p,
-                bench_task=self.bench_task or self.agent.name,
-                inline_system_prompt=False,
-            )
-            
-            content = ""
-            tool_calls = []
-            request_usage: dict = {}
-            
-            import json
-            try:
-                async for data in iter_sse_json_lines(resp.aiter_lines(), done_sentinel="[DONE]"):
-                    event_type = data.get("type")
-                    if event_type == "chunk":
-                        chunk_text = data.get("content", "")
-                        content += chunk_text
-                        # Opt-in only: echoing every token to stdout from
-                        # concurrent agents interleaves raw model text
-                        # character-by-character with the service log stream
-                        # (observed corrupting trading-service docker logs).
-                        if _STREAM_STDOUT:
-                            print(chunk_text, end="", flush=True)
-                    elif event_type == "tool_calls" or "toolCalls" in data:
-                        tool_calls = data.get("toolCalls", [])
-                    elif event_type == "tool_execution":
-                        status = data.get("status")
-                        tool_payload = data.get("tool") or data.get("toolCall", {})
-                        func_name = tool_payload.get("name", "")
-                        # Prism already executed this one, so we cannot refuse
-                        # it — but a silent `{}` here strips the args off the
-                        # telemetry row and makes a malformed-payload defect
-                        # look like a tool that takes no arguments.
-                        arguments, arg_error = decode_tool_arguments(
-                            tool_payload.get("args") or tool_payload.get("arguments")
-                        )
-                        if arg_error:
-                            logger.warning(
-                                f"[{self.agent.name}] Prism-internal {func_name} "
-                                f"had undecodable arguments; telemetry will "
-                                f"record none: {arg_error.splitlines()[0]}"
-                            )
-                        
-                        if status == "calling":
-                            # Prism announces the call before executing it, so
-                            # the round trip IS measurable from here. Without
-                            # this, every prism-internal tool was recorded at
-                            # elapsed_ms=0 (the branch below hardcoded it),
-                            # which is nearly all of them — a trading-service
-                            # audit on 2026-07-27 found all 8 lazy_web_search
-                            # failures logged as 0ms, making a fast refusal
-                            # indistinguishable from a 20s connect timeout.
-                            prism_tool_started[func_name] = time.time()
-                        elif status in ("done", "error"):
-                            # This was executed internally by Prism. We record it!
-                            result = tool_payload.get("result") if tool_payload.get("result") is not None else data.get("toolResult")
-                            was_blocked = False
-                            if self.on_tool_result is not None:
-                                try:
-                                    _t0 = prism_tool_started.pop(func_name, None)
-                                    # 0 still means "not measurable" — a missing
-                                    # `calling` event, not a 0ms call.
-                                    elapsed_ms = int((time.time() - _t0) * 1000) if _t0 else 0
-                                    self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
-                                except Exception as hook_err:
-                                    # Hooks are observational and must not kill a run —
-                                    # EXCEPT when the hook explicitly asks to abort
-                                    # (guard exceptions set abort_agent_run=True, e.g.
-                                    # doom-loop detectors). Swallowing those made every
-                                    # caller-side loop guard a silent no-op.
-                                    if getattr(hook_err, "abort_agent_run", False):
-                                        raise
-                                    logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
-                    elif event_type == "usage_update":
-                        usage = data.get("usage")
-                        if isinstance(usage, dict):
-                            request_usage = usage
-                    elif event_type == "done":
-                        if data.get("model"):
-                            self.last_model = data["model"]
-                        if data.get("provider"):
-                            self.last_provider = data["provider"]
-                    elif event_type == "error":
-                        logger.error(f"Prism stream error: {data.get('message')}")
-                    elif "text" in data and not event_type:
-                        content = data.get("text", content)
-                        tool_calls = data.get("toolCalls", tool_calls)
-
-                print() # flush newline after stream completes
-            finally:
-                # The last usage snapshot is cumulative for this stream. Record
-                # it once, including when cancellation interrupts generation.
-                if request_usage:
-                    self.last_usage = request_usage
-                    completion = (int(request_usage.get("outputTokens") or 0)
-                                  + int(request_usage.get("reasoningOutputTokens") or 0))
-                    self.total_tokens += int(request_usage.get("inputTokens") or 0) + completion
+        request = self._build_request()
+        run_id = await self.run_client.create_run(request)
+        
+        content = ""
+        try:
+            async for event in self.run_client.stream_run(run_id):
+                if isinstance(event, StreamChunk):
+                    content += event.content
+                    if _STREAM_STDOUT:
+                        print(event.content, end="", flush=True)
+                elif isinstance(event, StreamToolExecution):
+                    # Hook compat
+                    if event.status in ("done", "error") and self.on_tool_result:
+                        args, _ = decode_tool_arguments(event.tool.get("args") or event.tool.get("arguments"))
+                        self.on_tool_result(event.tool.get("name", ""), args, event.tool.get("result"), False, event.elapsed_ms)
+                elif isinstance(event, StreamUsage):
+                    self.last_usage = event.usage
+                    completion = (int(event.usage.get("outputTokens") or 0) + int(event.usage.get("reasoningOutputTokens") or 0))
+                    self.total_tokens += int(event.usage.get("inputTokens") or 0) + completion
                     self.completion_tokens += completion
                     self.usage_requests += 1
-                    self.prompt_tokens += int(request_usage.get("inputTokens") or 0)
-                    self.reasoning_tokens += int(request_usage.get("reasoningOutputTokens") or 0)
-                await resp.aclose()
-
-            # 2. Add LLM response to history
-            self.session.add_assistant_message(content, tool_calls)
-            
-            # 3. If no tool calls, we're done
-            if not tool_calls:
-                return content or ""
+                    self.prompt_tokens += int(event.usage.get("inputTokens") or 0)
+                    self.reasoning_tokens += int(event.usage.get("reasoningOutputTokens") or 0)
+                elif isinstance(event, StreamDone):
+                    self.last_model = event.model
+                    self.last_provider = event.provider
+                    if event.result and event.result.final_output:
+                        content = event.result.final_output
+                elif isinstance(event, StreamError):
+                    logger.error(f"Stream error: {event.error.message}")
+        finally:
+            if _STREAM_STDOUT:
+                print()
                 
-            # 4. Dispatch tool calls
-            for tc in tool_calls:
-                tc_id = tc.get("id", "")
-                if "function" in tc:
-                    func = tc.get("function", {})
-                    func_name = func.get("name", "")
-                    arguments, arg_error = decode_tool_arguments(func.get("arguments"))
-                else:
-                    func_name = tc.get("name", "")
-                    # `or` (not `is None`) preserves the original fallthrough:
-                    # an empty `arguments` defers to `args`.
-                    raw_arguments = tc.get("arguments") or tc.get("args")
-                    arguments, arg_error = decode_tool_arguments(raw_arguments)
-
-                logger.info(f"[{self.agent.name}] Executing tool: {func_name}")
-                elapsed_ms = 0
-
-                # Malformed arguments: tell the model, do NOT run the tool with
-                # `{}`. Running it anyway produces a misleading "required field
-                # missing" rejection that hides the real defect, and burns the
-                # turn — see decode_tool_arguments().
-                if arg_error is not None:
-                    logger.warning(
-                        f"[{self.agent.name}] Malformed arguments for "
-                        f"{func_name}: {arg_error.splitlines()[0]}"
-                    )
-                    result = {"error": arg_error, "is_error": True}
-                    was_blocked = False
-                    self.loop_detector.record_call(func_name, arguments, failed=True)
-                # Check for human-in-the-loop pauses
-                elif func_name in ("ask_user_question", "request_plan_approval"):
-                    result = await self._handle_pausing_tool(func_name, arguments)
-                    was_blocked = False
-                else:
-                    override_result = None
-                    # Internal loop detection
-                    loop_block_msg = self.loop_detector.record_call(func_name, arguments, failed=True)
-                    if loop_block_msg:
-                        override_result = loop_block_msg
-                    else:
-                        # Undo the speculative failure record
-                        key = self.loop_detector._make_key(func_name, arguments, failed=True)
-                        self.loop_detector._history[key] = max(0, self.loop_detector._history.get(key, 1) - 1)
-                    
-                    # External Hook
-                    if override_result is None and self.on_tool_call is not None:
-                        override_result = self.on_tool_call(func_name, arguments)
-                    
-                    if override_result is not None:
-                        # Hook blocked this call — use override as result
-                        logger.warning(f"[{self.agent.name}] Tool call blocked: {func_name}")
-                        result = {"blocked": True, "message": override_result}
-                        was_blocked = True
-                    else:
-                        # Execute via the tool service proxy. Stamp identity
-                        # headers so the proxy's per-conversation whitelist can
-                        # actually key on this session (it fails open otherwise).
-                        identity_headers = {"x-agent": self.agent.name}
-                        get_conv = getattr(self.agent.llm_client, "get_conversation_id", None)
-                        if callable(get_conv):
-                            conv_id = get_conv(self.agent.name, self.session.session_id)
-                            if conv_id:
-                                identity_headers["x-conversation-id"] = conv_id
-                        t0_tool = time.time()
-                        result = await tool_executor.execute_tool(
-                            func_name, arguments, headers=identity_headers
-                        )
-                        elapsed_ms = int((time.time() - t0_tool) * 1000)
-                        was_blocked = False
-                        
-                        # Record actual outcome
-                        failed = False
-                        if isinstance(result, dict):
-                            if result.get("error") or result.get("is_error"):
-                                failed = True
-                            elif not result:
-                                failed = True
-                        elif result is None:
-                            failed = True
-                        
-                        self.loop_detector.record_call(func_name, arguments, failed=failed)
-                
-                # Notify post-call hook (e.g. ToolLoopDetector records outcome)
-                if self.on_tool_result is not None and func_name not in ("ask_user_question", "request_plan_approval"):
-                    try:
-                        self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
-                    except Exception as hook_err:
-                        # Same abort contract as the prism-internal tool site above.
-                        if getattr(hook_err, "abort_agent_run", False):
-                            raise
-                        logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
-                
-                # 5. Add result to history (truncate oversized payloads to prevent context overflow)
-                result_str = json.dumps(result, default=str)
-                if len(result_str) > self.max_tool_result_chars:
-                    logger.warning(
-                        f"[{self.agent.name}] Truncating tool result for {func_name}: "
-                        f"{len(result_str):,} chars → {self.max_tool_result_chars:,} chars"
-                    )
-                    result_str = result_str[:self.max_tool_result_chars] + (
-                        f'\n\n[TRUNCATED: result was {len(result_str):,} chars, '
-                        f'showing first {self.max_tool_result_chars:,}]'
-                    )
-                self.session.add_tool_message(
-                    tool_call_id=tc_id,
-                    name=func_name,
-                    content=result_str,
-                )
-                
-        logger.warning(f"[{self.agent.name}] Reached max iterations ({self.max_iterations})")
-        return "Max iterations reached without a final answer."
-
-    async def _handle_pausing_tool(self, func_name: str, arguments: dict) -> Any:
-        import os
-        import time
-        import json
-        import asyncio
-        
-        session_id = self.session.session_id
-        if not session_id:
-            session_id = f"session-{int(time.time())}"
-            
-        # Emit SSE status event to stdout for Express to forward to SSE client
-        if func_name == "ask_user_question":
-            question_text = arguments.get("question") or arguments.get("prompt") or ""
-            choices = arguments.get("choices", [])
-            print(f'data: {json.dumps({"type": "question", "question": question_text, "choices": choices})}', flush=True)
-        else: # request_plan_approval
-            plan_text = arguments.get("plan") or arguments.get("details") or ""
-            print(f'data: {json.dumps({"type": "approval_required", "plan": plan_text})}', flush=True)
-            
-        # Poll file system for response file
-        pause_file = os.path.join("data", "pauses", f"{session_id}.json")
-        
-        # Max wait: 10 minutes (600 seconds)
-        max_wait = 600
-        elapsed = 0
-        while elapsed < max_wait:
-            if os.path.exists(pause_file):
-                try:
-                    # Give a tiny buffer for file system synchronization
-                    await asyncio.sleep(0.1)
-                    with open(pause_file, "r") as f:
-                        data = json.load(f)
-                    
-                    # Clean up file
-                    try:
-                        os.remove(pause_file)
-                    except Exception:
-                        pass
-                    
-                    if func_name == "ask_user_question":
-                        return {"answers": data.get("answers") or [{"answer": data.get("answer", "")}]}
-                    else: # request_plan_approval
-                        return {"approved": data.get("approved", True)}
-                except Exception as e:
-                    logger.error("Failed to read pause file: %s", e)
-                    
-            await asyncio.sleep(1.0)
-            elapsed += 1
-            
-        return {"error": "Timeout waiting for user response"}
+        self.session.add_assistant_message(content)
+        return content
 
     async def stream_run(self, payload_override: dict | None = None):
-        """
-        Yields raw Server-Sent Events from Prism. 
-        If payload_override is provided, it passes those parameters to Prism 
-        (useful for MCP tool execution where Prism loops internally).
-        Otherwise it uses the local agent config.
-        """
-        import httpx
-        import json
-        
-        url = f"{self.agent.llm_client.url}/agent"
-        
-        payload = {
-            "provider": self.agent.provider,
-            "model": self.agent.model,
-            "messages": self.session.get_messages(),
-            "maxTokens": 8192,
-            "systemPrompt": self.agent.system_prompt,
-            "agent": self.agent.name,
-            "stream": True
-        }
-        
+        """Yields raw Server-Sent Events, wrapping the new RunClient stream."""
+        request = self._build_request()
         if payload_override:
-            payload.update(payload_override)
+            # Quick conversion to model schema
+            if "model" in payload_override:
+                request.profile.model = payload_override["model"]
+            if "systemPrompt" in payload_override:
+                request.profile.system_prompt = payload_override["systemPrompt"]
+            if "messages" in payload_override:
+                request.messages = payload_override["messages"]
             
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            async with client.stream(
-                "POST", 
-                url,
-                json=payload,
-                # prism attributes by these HEADERS, not body fields — without them
-                # the run lands in prism's unattributable "default" project.
-                headers={"Accept": "text/event-stream",
-                         "x-project": self.agent.project,
-                         "x-username": self.agent.username}
-            ) as resp:
-                if resp.status_code != 200:
-                    error_body = ""
-                    async for chunk in resp.aiter_text():
-                        error_body += chunk
-                    yield format_sse({"type": "error", "message": f"Prism error {resp.status_code}: {error_body[:500]}"})
-                    return
+        run_id = await self.run_client.create_run(request)
+        
+        try:
+            async for event in self.run_client.stream_run(run_id):
+                # Emit raw SSE as consumers expect string frames
+                yield format_sse(event.model_dump())
+        except Exception as e:
+            yield format_sse({"type": "error", "message": f"Client stream error: {e}"})
 
-                async for line in iter_sse_lines(resp.aiter_text()):
-                    yield f"{line}\n\n"
+    async def _handle_pausing_tool(self, func_name: str, arguments: dict) -> Any:
+        # Legacy fallback; handled by remote server now.
+        pass
