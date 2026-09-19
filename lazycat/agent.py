@@ -153,7 +153,17 @@ class ToolLoopDetector:
         return None
 
 class BaseAgent:
-    """Base class for all LazyCat SDK agents."""
+    """Base class for all LazyCat SDK agents.
+
+    .. deprecated:: 0.4.0
+        The local BaseAgent and AgentHarness loop is deprecated and scheduled for
+        deletion in Phase 5. Consumers must migrate to ``lazycat.RuntimeClient``
+        calling the authoritative ``/v1/runs`` endpoint.
+        
+        Permitted transitional callers:
+        - Legacy unmigrated agent test suites
+        - Temporary local scripts pending Phase 4 cutover
+    """
     
     def __init__(
         self,
@@ -169,6 +179,13 @@ class BaseAgent:
         auto_approve: bool = True,
         min_p: float | None = None,
     ):
+        import warnings
+        warnings.warn(
+            "BaseAgent is deprecated as of 0.4.0 and scheduled for deletion in Phase 5. "
+            "Use lazycat.RuntimeClient instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.name = name
         self.system_prompt = system_prompt
         self.model = model
@@ -204,6 +221,15 @@ class AgentHarness:
     """Standardized tool-call loop.
     
     send message -> check for tool calls -> dispatch -> loop until done.
+
+    .. deprecated:: 0.4.0
+        The local AgentHarness loop is deprecated and scheduled for deletion in Phase 5.
+        Consumers must migrate to ``lazycat.RuntimeClient`` calling the authoritative
+        ``/v1/runs`` endpoint.
+        
+        Permitted transitional callers:
+        - Legacy unmigrated agent test suites
+        - Temporary local scripts pending Phase 4 cutover
     """
     
     def __init__(
@@ -217,6 +243,13 @@ class AgentHarness:
         thinking_enabled: bool | None = None,
         bench_task: str | None = None,
     ):
+        import warnings
+        warnings.warn(
+            "AgentHarness is deprecated as of 0.4.0 and scheduled for deletion in Phase 5. "
+            "Use lazycat.RuntimeClient instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.agent = agent
         self.session = session
         self.max_iterations = max_iterations

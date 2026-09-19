@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+from typing import Any, AsyncIterator, Optional
+import httpx
+from pydantic import ValidationError
+
+from lazycat.models import (
+    CreateRunRequest,
+    RunEvent,
+    RunResult,
+    StructuredError,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class RuntimeClientError(Exception):
+    """Base exception for RuntimeClient errors."""
+    def __init__(self, message: str, status_code: Optional[int] = None, structured_error: Optional[StructuredError] = None, details: Any = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.structured_error = structured_error
+        self.details = details
+
+
+class RunNotFoundError(RuntimeClientError):
+    """Raised when the requested run ID is not found on the runtime server."""
+    pass
+
+
+class RunTimeoutError(RuntimeClientError):
+    """Raised when an operation on a run times out."""
+    pass
+
+
+class RunEventDecodeError(RuntimeClientError):
+    """Raised when an incoming Server-Sent Event cannot be strictly decoded according to the contract."""
+    pass
+
+
+class RuntimeClient:
+    """
+    Canonical typed client for lazy-agent-service v1 agent execution API (/v1/runs).
+    
+    Provides non-streaming execution, SSE streaming, status inspection, and cancellation.
+    No provider transport or internal harness logic is embedded here.
+    """
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        timeout: float = 600.0,
+        project: str = "trading",
+        username: str = "lazycat",
+        client: Optional[httpx.AsyncClient] = None,
+    ):
+        raw_url = base_url or os.environ.get("AGENT_SERVICE_URL") or os.environ.get("LAZY_AGENT_URL") or "http://localhost:8080/v1/runs"
+        raw_url = raw_url.rstrip("/")
+        if not raw_url.endswith("/v1/runs") and not raw_url.endswith("/runs"):
+            raw_url = f"{raw_url}/v1/runs"
+        self.base_url = raw_url
+        self.timeout = timeout
+        self.project = project
+        self.username = username
+        self._external_client = client
+
+    def _get_headers(self, idempotency_key: Optional[str] = None) -> dict[str, str]:
+        headers = {
+            "x-project": self.project,
+            "x-username": self.username,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if idempotency_key:
+            headers["x-idempotency-key"] = idempotency_key
+        return headers
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._external_client is not None:
+            return self._external_client
+        return httpx.AsyncClient(timeout=self.timeout)
+
+    async def create_run(self, request: CreateRunRequest) -> RunResult:
+        """
+        Execute a run non-streaming to completion.
+        
+        POST /v1/runs with stream=False.
+        Returns the terminal RunResult.
+        """
+        # Ensure non-streaming flag
+        req_data = request.model_dump(by_alias=False, exclude_none=True)
+        req_data["stream"] = False
+        headers = self._get_headers(idempotency_key=request.idempotency_key)
+
+        client = self._get_http_client()
+        should_close = self._external_client is None
+        try:
+            resp = await client.post(self.base_url, json=req_data, headers=headers)
+            if resp.status_code in (200, 201):
+                return RunResult.model_validate(resp.json())
+
+            # Parse structured error if present
+            err_data = None
+            structured_err = None
+            try:
+                err_data = resp.json()
+                if "error" in err_data and isinstance(err_data["error"], dict):
+                    structured_err = StructuredError.model_validate(err_data["error"])
+            except Exception:
+                pass
+
+            msg = f"Failed to create run (HTTP {resp.status_code}): {resp.text}"
+            if structured_err:
+                msg = f"Runtime error [{structured_err.code}]: {structured_err.message}"
+
+            if resp.status_code == 404:
+                raise RunNotFoundError(msg, status_code=resp.status_code, structured_error=structured_err, details=err_data)
+            raise RuntimeClientError(msg, status_code=resp.status_code, structured_error=structured_err, details=err_data)
+        finally:
+            if should_close:
+                await client.aclose()
+
+    async def stream_run(self, request: CreateRunRequest) -> AsyncIterator[RunEvent]:
+        """
+        Execute a run with streaming Server-Sent Events.
+        
+        POST /v1/runs with stream=True.
+        Strictly decodes incoming SSE events into canonical RunEvent objects.
+        """
+        req_data = request.model_dump(by_alias=False, exclude_none=True)
+        req_data["stream"] = True
+        headers = self._get_headers(idempotency_key=request.idempotency_key)
+        headers["Accept"] = "text/event-stream"
+
+        client = self._get_http_client()
+        should_close = self._external_client is None
+        try:
+            async with client.stream("POST", self.base_url, json=req_data, headers=headers) as resp:
+                if resp.status_code != 200:
+                    err_text = ""
+                    async for chunk in resp.aiter_text():
+                        err_text += chunk
+                    raise RuntimeClientError(
+                        f"Failed to initiate run stream (HTTP {resp.status_code}): {err_text}",
+                        status_code=resp.status_code
+                    )
+
+                buffer = ""
+                async for chunk in resp.aiter_text():
+                    buffer += chunk
+                    while "\n\n" in buffer:
+                        block, buffer = buffer.split("\n\n", 1)
+                        for line in block.split("\n"):
+                            line = line.strip()
+                            if not line or not line.startswith("data:"):
+                                continue
+                            raw_payload = line[len("data:"):].strip()
+                            if raw_payload == "[DONE]":
+                                return
+
+                            try:
+                                event_dict = json.loads(raw_payload)
+                            except json.JSONDecodeError as jde:
+                                raise RunEventDecodeError(
+                                    f"Malformed JSON in SSE stream: {jde}",
+                                    details=raw_payload
+                                ) from jde
+
+                            if not isinstance(event_dict, dict):
+                                raise RunEventDecodeError(
+                                    f"SSE data payload must be a JSON object, got {type(event_dict).__name__}",
+                                    details=raw_payload
+                                )
+
+                            try:
+                                event = RunEvent.model_validate(event_dict)
+                            except ValidationError as ve:
+                                raise RunEventDecodeError(
+                                    f"SSE event failed contract validation: {ve}",
+                                    details=event_dict
+                                ) from ve
+
+                            yield event
+        finally:
+            if should_close:
+                await client.aclose()
+
+    async def get_run(self, run_id: str) -> RunResult:
+        """
+        Fetch the current status and result of an existing run.
+        
+        GET /v1/runs/{run_id}.
+        """
+        url = f"{self.base_url}/{run_id}"
+        headers = self._get_headers()
+
+        client = self._get_http_client()
+        should_close = self._external_client is None
+        try:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return RunResult.model_validate(resp.json())
+            if resp.status_code == 404:
+                raise RunNotFoundError(f"Run '{run_id}' not found", status_code=404)
+            raise RuntimeClientError(f"Failed to fetch run '{run_id}' (HTTP {resp.status_code}): {resp.text}", status_code=resp.status_code)
+        finally:
+            if should_close:
+                await client.aclose()
+
+    async def cancel_run(self, run_id: str) -> bool:
+        """
+        Explicitly cancel an active run.
+        
+        POST /v1/runs/{run_id}/cancel.
+        """
+        url = f"{self.base_url}/{run_id}/cancel"
+        headers = self._get_headers()
+
+        client = self._get_http_client()
+        should_close = self._external_client is None
+        try:
+            resp = await client.post(url, headers=headers)
+            if resp.status_code in (200, 202):
+                data = resp.json()
+                return data.get("cancelled", True)
+            if resp.status_code == 404:
+                raise RunNotFoundError(f"Run '{run_id}' not found for cancellation", status_code=404)
+            raise RuntimeClientError(f"Failed to cancel run '{run_id}' (HTTP {resp.status_code}): {resp.text}", status_code=resp.status_code)
+        finally:
+            if should_close:
+                await client.aclose()
