@@ -1,0 +1,849 @@
+{
+  "contract_version": "runtime-wire.v1.0.0",
+  "digest": "sha256-22b681c9f708c0962a7aeaa68c22f77d748b4dc605b4dd589da9c036d061892b",
+  "generated_by": "scripts/export-runtime-wire.ts",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "contract_version": {
+        "type": "string",
+        "const": "runtime-wire.v1.0.0"
+      },
+      "run_request": {
+        "type": "object",
+        "properties": {
+          "contract_version": {
+            "type": "string"
+          },
+          "contractVersion": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "profileId": {
+            "type": "string"
+          },
+          "profile_version": {
+            "type": "string"
+          },
+          "profileVersion": {
+            "type": "string"
+          },
+          "app_id": {
+            "type": "string"
+          },
+          "appId": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "system",
+                        "user",
+                        "assistant",
+                        "tool"
+                      ]
+                    },
+                    "content": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "role",
+                    "content"
+                  ],
+                  "additionalProperties": {}
+                }
+              }
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "budget": {
+            "type": "object",
+            "properties": {
+              "max_tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "maxTokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "max_tool_calls": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "maxToolCalls": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "max_retries": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "maxRetries": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "max_duration_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "maxDurationMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "additionalProperties": false
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "additionalProperties": {}
+                }
+              ]
+            }
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "deadline_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "runtime_overrides": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "sampling_temperature": {
+                "type": "number"
+              },
+              "budget": {
+                "type": "object",
+                "properties": {
+                  "max_tokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "maxTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "max_tool_calls": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "maxToolCalls": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "max_retries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "maxRetries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "max_duration_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "maxDurationMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "additionalProperties": false
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "additionalProperties": {}
+                    }
+                  ]
+                }
+              },
+              "context": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              },
+              "local_tool_schemas": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "parameters": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "object"
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": {}
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "description",
+                    "parameters"
+                  ],
+                  "additionalProperties": {}
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "additionalProperties": false
+      },
+      "decision_request": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "capability": {
+            "type": "string",
+            "const": "semantic.choice.v1"
+          },
+          "questionId": {
+            "type": "string",
+            "enum": [
+              "agent.next_readonly_action.v1",
+              "agent.evidence_sufficiency.v1"
+            ]
+          },
+          "policyVersion": {
+            "type": "string",
+            "const": "shadow.v1"
+          },
+          "dataClassification": {
+            "type": "string",
+            "const": "public"
+          },
+          "state": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "questions": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "choice"
+                },
+                "instructions": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                "criteria": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "maxLength": 512
+                  }
+                },
+                "requiredAbstainOption": {
+                  "type": "boolean",
+                  "const": true
+                }
+              },
+              "required": [
+                "type",
+                "instructions",
+                "criteria",
+                "requiredAbstainOption"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "constraints": {
+            "type": "object",
+            "properties": {
+              "maxLatencyMs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000
+              },
+              "shadowOnly": {
+                "type": "boolean",
+                "const": true
+              },
+              "noSideEffects": {
+                "type": "boolean",
+                "const": true
+              },
+              "maxAttempts": {
+                "type": "number",
+                "const": 1
+              }
+            },
+            "required": [
+              "maxLatencyMs",
+              "shadowOnly",
+              "noSideEffects",
+              "maxAttempts"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "requestId",
+          "runId",
+          "capability",
+          "questionId",
+          "policyVersion",
+          "dataClassification",
+          "state",
+          "questions",
+          "constraints"
+        ],
+        "additionalProperties": false
+      },
+      "decision_result": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "provider": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "const": "tinymodels"
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "modelId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "artifactId": {
+                "type": "string"
+              },
+              "deploymentId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "deploymentState": {
+                "type": "string",
+                "enum": [
+                  "candidate_shadow",
+                  "advisory_shadow"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "version",
+              "modelId",
+              "deploymentId",
+              "deploymentState"
+            ],
+            "additionalProperties": false
+          },
+          "results": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "choice"
+                },
+                "value": {
+                  "type": "string"
+                },
+                "probabilities": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "rawConfidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "calibratedConfidence": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "calibrationState": {
+                  "type": "string",
+                  "enum": [
+                    "uncalibrated",
+                    "calibrated",
+                    "not_available"
+                  ]
+                },
+                "abstained": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "type",
+                "value",
+                "calibrationState",
+                "abstained"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "inputHash": {
+                "type": "string",
+                "pattern": "^sha256-[a-f0-9]{64}$"
+              },
+              "outputHash": {
+                "type": "string",
+                "pattern": "^sha256-[a-f0-9]{64}$"
+              },
+              "processUnloaded": {
+                "type": "boolean"
+              },
+              "latencyMs": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "inputHash",
+              "outputHash",
+              "processUnloaded",
+              "latencyMs"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "requestId",
+          "provider",
+          "results",
+          "evidence"
+        ],
+        "additionalProperties": false
+      },
+      "run_event": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "run.admitted",
+              "run.started",
+              "run.created",
+              "message.delta",
+              "message.completed",
+              "tool.invoked",
+              "tool.called",
+              "tool.completed",
+              "tool.result",
+              "tool.failed",
+              "approval.required",
+              "approval.resolved",
+              "worker.dispatched",
+              "worker.completed",
+              "run.completed",
+              "run.failed",
+              "run.cancelled"
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+          },
+          "data": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "id",
+          "run_id",
+          "type",
+          "timestamp",
+          "data"
+        ],
+        "additionalProperties": false
+      },
+      "run_result": {
+        "type": "object",
+        "properties": {
+          "contract_version": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "admitted",
+              "running",
+              "waiting_for_tool",
+              "waiting_for_worker",
+              "waiting_for_approval",
+              "completed",
+              "failed",
+              "cancelled",
+              "timed_out"
+            ]
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "profile_version": {
+            "type": "string"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "prompt_tokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "completion_tokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "total_tokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "tool_calls_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "retry_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "duration_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "prompt_tokens",
+              "completion_tokens",
+              "total_tokens",
+              "tool_calls_count",
+              "retry_count",
+              "duration_ms"
+            ],
+            "additionalProperties": {}
+          },
+          "context_receipt": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
+          "evidence_records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          },
+          "error": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "run_id",
+          "status",
+          "messages"
+        ],
+        "additionalProperties": false
+      },
+      "tool_result_command": {
+        "type": "object",
+        "properties": {
+          "result": {},
+          "is_error": {
+            "type": "boolean"
+          },
+          "authorization_receipt": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "result",
+          "is_error",
+          "authorization_receipt"
+        ],
+        "additionalProperties": false
+      },
+      "approval_resolution_command": {
+        "type": "object",
+        "properties": {
+          "approved": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "approved"
+        ],
+        "additionalProperties": false
+      },
+      "approval": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tool_call_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tool_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "arguments_hash": {
+            "type": "string",
+            "minLength": 1
+          },
+          "app_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+          }
+        },
+        "required": [
+          "id",
+          "tool_call_id",
+          "tool_name",
+          "arguments_hash",
+          "app_id",
+          "session_id",
+          "expires_at"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "contract_version",
+      "run_request",
+      "decision_request",
+      "decision_result",
+      "run_event",
+      "run_result",
+      "tool_result_command",
+      "approval_resolution_command",
+      "approval"
+    ],
+    "additionalProperties": false
+  }
+}

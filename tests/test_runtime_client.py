@@ -313,3 +313,16 @@ async def test_runtime_client_resolves_scoped_approval():
     )
     assert result["ok"] is True
     assert json.loads(route.calls.last.request.content) == {"approved": True}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_runtime_client_checks_wire_contract_version_and_digest():
+    route = respx.get("http://agent-test/v1/contracts/wire-schema").respond(
+        status_code=200, json={"contract_version": "runtime-wire.v1.0.0", "digest": "sha256-wire"}
+    )
+    document = await RuntimeClient(base_url="http://agent-test/v1/runs").check_wire_compatibility(
+        "runtime-wire.v1.0.0", "sha256-wire"
+    )
+    assert document["digest"] == "sha256-wire"
+    assert route.called

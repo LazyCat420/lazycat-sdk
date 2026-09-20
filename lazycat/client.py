@@ -95,6 +95,29 @@ class RuntimeClient:
             return self._external_client
         return httpx.AsyncClient(timeout=self.timeout)
 
+    @property
+    def wire_contract_url(self) -> str:
+        """Return the service's neutral wire-contract endpoint."""
+        return self.base_url.rsplit("/v1/runs", 1)[0] + "/v1/contracts/wire-schema"
+
+    async def check_wire_compatibility(self, expected_version: str, expected_digest: Optional[str] = None) -> dict[str, Any]:
+        """Fetch and validate the runtime wire contract before starting work."""
+        client = self._get_http_client()
+        should_close = self._external_client is None
+        try:
+            resp = await client.get(self.wire_contract_url, headers=self._get_headers())
+            if resp.status_code != 200:
+                raise RuntimeClientError(f"Failed to fetch runtime wire contract (HTTP {resp.status_code})", status_code=resp.status_code)
+            document = resp.json()
+            if document.get("contract_version") != expected_version:
+                raise RuntimeClientError("Runtime wire contract version mismatch", details=document)
+            if expected_digest is not None and document.get("digest") != expected_digest:
+                raise RuntimeClientError("Runtime wire contract digest mismatch", details=document)
+            return document
+        finally:
+            if should_close:
+                await client.aclose()
+
     async def create_run(self, request: CreateRunRequest) -> RunResult:
         """
         Execute a run non-streaming to completion.
