@@ -234,6 +234,7 @@ class RunEvent(BaseModel):
     )
     id: constr(min_length=1)
     run_id: constr(min_length=1)
+    runId: str | None = None
     type: Type
     timestamp: AwareDatetime
     data: dict[str, Any]

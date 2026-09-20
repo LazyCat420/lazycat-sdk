@@ -6,6 +6,7 @@ import os
 from typing import Any, AsyncIterator, Optional
 import httpx
 from pydantic import ValidationError
+from lazycat.generated_runtime_models import RunEvent as GeneratedRunEvent, RunResult as GeneratedRunResult
 
 from lazycat.models import (
     CreateRunRequest,
@@ -95,6 +96,32 @@ class RuntimeClient:
             return self._external_client
         return httpx.AsyncClient(timeout=self.timeout)
 
+    @staticmethod
+    def _validate_wire_event(raw: dict[str, Any]) -> RunEvent:
+        # Additive extension events remain accepted by the compatibility model;
+        # every canonical event is checked against the generated neutral schema.
+        generated_raw = {**raw}
+        if "run_id" not in generated_raw and "runId" in generated_raw:
+            generated_raw["run_id"] = generated_raw["runId"]
+        if raw.get("type") in {
+            "run.admitted", "run.started", "run.created", "message.delta", "message.completed",
+            "tool.invoked", "tool.called", "tool.completed", "tool.result", "tool.failed",
+            "approval.required", "approval.resolved", "worker.dispatched", "worker.completed",
+            "run.completed", "run.failed", "run.cancelled",
+        }:
+            GeneratedRunEvent.model_validate(generated_raw)
+        return RunEvent.model_validate(raw)
+
+    @staticmethod
+    def _validate_wire_result(raw: dict[str, Any]) -> RunResult:
+        result = RunResult.model_validate(raw)
+        if result.status in {"admitted", "running", "waiting_for_tool", "waiting_for_worker", "waiting_for_approval", "completed", "failed", "cancelled", "timed_out"}:
+            generated_raw = {**raw}
+            if "run_id" not in generated_raw and "id" in generated_raw:
+                generated_raw["run_id"] = generated_raw["id"]
+            GeneratedRunResult.model_validate(generated_raw)
+        return result
+
     @property
     def wire_contract_url(self) -> str:
         """Return the service's neutral wire-contract endpoint."""
@@ -135,7 +162,7 @@ class RuntimeClient:
         try:
             resp = await client.post(self.base_url, json=req_data, headers=headers)
             if resp.status_code in (200, 201):
-                return RunResult.model_validate(resp.json())
+                return self._validate_wire_result(resp.json())
 
             # Parse structured error if present
             err_data = None
@@ -199,7 +226,7 @@ class RuntimeClient:
                     if raw_payload == "[DONE]":
                         raise RunEventDecodeError("Stream ended without a terminal run outcome")
                     try:
-                        event = RunEvent.model_validate(json.loads(raw_payload))
+                        event = self._validate_wire_event(json.loads(raw_payload))
                     except (json.JSONDecodeError, ValidationError) as exc:
                         raise RunEventDecodeError("Invalid runtime SSE event", details=raw_payload) from exc
                     if event.id in seen:
@@ -280,7 +307,7 @@ class RuntimeClient:
                     raw_payload = "\n".join(data_lines)
                     data_lines.clear()
                     try:
-                        event = RunEvent.model_validate(json.loads(raw_payload))
+                        event = self._validate_wire_event(json.loads(raw_payload))
                     except (json.JSONDecodeError, ValidationError) as exc:
                         raise RunEventDecodeError("Invalid replay SSE event", details=raw_payload) from exc
                     if event.id in seen:
@@ -322,7 +349,7 @@ class RuntimeClient:
         try:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                return RunResult.model_validate(resp.json())
+                return self._validate_wire_result(resp.json())
             if resp.status_code == 404:
                 raise RunNotFoundError(f"Run '{run_id}' not found", status_code=404)
             raise RuntimeClientError(f"Failed to fetch run '{run_id}' (HTTP {resp.status_code}): {resp.text}", status_code=resp.status_code)

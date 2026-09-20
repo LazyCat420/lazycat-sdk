@@ -1,6 +1,6 @@
 {
   "contract_version": "runtime-wire.v1.0.0",
-  "digest": "sha256-22b681c9f708c0962a7aeaa68c22f77d748b4dc605b4dd589da9c036d061892b",
+  "digest": "sha256-de254c9c95a74bb1a3e13f21b33527cbd993a45a7cca40bdac36eedd9a79f84a",
   "generated_by": "scripts/export-runtime-wire.ts",
   "schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -569,6 +569,9 @@
           "run_id": {
             "type": "string",
             "minLength": 1
+          },
+          "runId": {
+            "type": "string"
           },
           "type": {
             "type": "string",
