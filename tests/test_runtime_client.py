@@ -48,9 +48,9 @@ def test_models_contract_validation():
     assert req_camel.budget.max_tokens == 4096
     assert req_camel.idempotency_key == "key-456"
 
-    # Test invalid budget exceeding limits
-    with pytest.raises(ValidationError):
-        RunBudget(max_tokens=50000)  # max is 32768
+    # The wire contract accepts larger budgets; the runtime profile enforces
+    # the operational ceiling.
+    assert RunBudget(max_tokens=65536).max_tokens == 65536
 
     with pytest.raises(ValidationError):
         RunBudget(max_tool_calls=100)  # max is 50

@@ -9,7 +9,9 @@ class RunBudget(BaseModel):
     """Execution budget constraints matching docs/contracts/run-contract-v1.json."""
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
-    max_tokens: Optional[int] = Field(default=None, alias="maxTokens", ge=0, le=32768)
+    # The neutral RuntimeWire schema leaves the operational ceiling to the
+    # admitted profile; the client must not reject valid runtime budgets.
+    max_tokens: Optional[int] = Field(default=None, alias="maxTokens", ge=0, le=9007199254740991)
     max_tool_calls: Optional[int] = Field(default=None, alias="maxToolCalls", ge=0, le=50)
     max_retries: Optional[int] = Field(default=None, alias="maxRetries", ge=0, le=10)
     max_duration_ms: Optional[int] = Field(default=None, alias="maxDurationMs", ge=0, le=600000)
