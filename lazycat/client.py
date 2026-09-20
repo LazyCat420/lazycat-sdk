@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import asyncio
 from typing import Any, AsyncIterator, Optional
 import httpx
 from pydantic import ValidationError
@@ -199,6 +200,8 @@ class RuntimeClient:
 
         client = self._get_http_client()
         should_close = self._external_client is None
+        run_id: Optional[str] = None
+        terminal_seen = False
         try:
             async with client.stream("POST", self.base_url, json=req_data, headers=headers) as resp:
                 if resp.status_code != 200:
@@ -232,10 +235,39 @@ class RuntimeClient:
                     if event.id in seen:
                         continue
                     seen.add(event.id)
+                    run_id = event.run_id or run_id
                     yield event
                     if event.type in ("run.completed", "run.failed", "run.cancelled"):
+                        terminal_seen = True
                         return
                 raise RunEventDecodeError("Runtime stream ended before a terminal run outcome")
+        finally:
+            if run_id and not terminal_seen:
+                # Closing an SSE response does not cancel the server-side run.
+                # Use a bounded child task so cancellation/transport failures
+                # never mask the original stream exception.
+                cancel_task = asyncio.create_task(self.cancel_run(run_id))
+                try:
+                    await asyncio.wait_for(asyncio.shield(cancel_task), timeout=2.0)
+                except BaseException:
+                    cancel_task.cancel()
+            if should_close:
+                await client.aclose()
+
+    async def steer_run(self, run_id: str, instruction: str) -> dict[str, Any]:
+        """Queue a bounded instruction for the run's next model turn."""
+        if not isinstance(instruction, str) or not instruction.strip() or len(instruction) > 4096:
+            raise ValueError("instruction must be 1-4096 non-whitespace characters")
+        url = f"{self.base_url}/{run_id}/steer"
+        client = self._get_http_client()
+        should_close = self._external_client is None
+        try:
+            resp = await client.post(url, headers=self._get_headers(), json={"instruction": instruction})
+            if resp.status_code == 202:
+                return resp.json()
+            if resp.status_code == 404:
+                raise RunNotFoundError(f"Run '{run_id}' not found for steering", status_code=404)
+            raise RuntimeClientError(f"Failed to steer run '{run_id}' (HTTP {resp.status_code}): {resp.text}", status_code=resp.status_code)
         finally:
             if should_close:
                 await client.aclose()

@@ -211,12 +211,32 @@ async def test_runtime_client_stream_run_malformed_event_fails_visibly():
         content=sse_body.encode("utf-8"),
         headers={"Content-Type": "text/event-stream"},
     )
+    cancel = respx.post("http://agent-test/v1/runs/run-stream/cancel").respond(
+        status_code=202, json={"cancelled": True}
+    )
 
     req = CreateRunRequest(profile_id="v3_junior_analyst", input="Stream me")
 
     with pytest.raises(RunEventDecodeError):
         async for _ in client.stream_run(req):
             pass
+    assert cancel.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_runtime_client_steer_run_is_scoped_and_bounded():
+    client = RuntimeClient(base_url="http://agent-test/v1/runs", project="music", username="u1")
+    route = respx.post("http://agent-test/v1/runs/run-123/steer").respond(
+        status_code=202, json={"accepted": True, "delivery": "next_model_turn"}
+    )
+
+    result = await client.steer_run("run-123", "Use the latest observation.")
+
+    assert result["accepted"] is True
+    assert route.calls[0].request.headers["x-project"] == "music"
+    with pytest.raises(ValueError):
+        await client.steer_run("run-123", " ")
 
 
 @pytest.mark.asyncio
