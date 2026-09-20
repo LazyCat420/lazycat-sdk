@@ -13,6 +13,13 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 schema = ROOT / "contracts" / "runtime-wire-v1.json"
 output = ROOT / "lazycat" / "generated_runtime_models.py"
+contract_output = ROOT / "lazycat" / "contract.py"
+metadata = json.loads(schema.read_text())
+contract_output.write_text(
+    '"""Pinned runtime wire contract identity generated from the bundled schema."""\n\n'
+    f'WIRE_CONTRACT_VERSION = {metadata["contract_version"]!r}\n'
+    f'WIRE_CONTRACT_SHA256 = {metadata["digest"]!r}\n'
+)
 generator = shutil.which("datamodel-codegen")
 if generator is None:
     raise SystemExit("datamodel-codegen is required; install the SDK dev dependencies first")
