@@ -83,3 +83,16 @@ async def test_expired_discovery_replaces_moved_and_removed_models():
     assert await client._resolve_provider_instance("moved") == "new-endpoint"
     assert "removed" not in client._model_to_provider_cache
     transport.get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_discovery_does_not_use_stale_provider_cache():
+    client = PrismClient()
+    client._model_to_provider_cache = {"stale-model": "old-endpoint"}
+    response = MagicMock(status_code=503)
+    transport = MagicMock()
+    transport.get = AsyncMock(return_value=response)
+    client._get_client = AsyncMock(return_value=transport)
+    resolved = await client._resolve_provider_instance("new-model")
+    assert resolved == "vllm"
+    assert client._model_to_provider_cache == {}

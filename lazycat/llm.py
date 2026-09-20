@@ -331,7 +331,17 @@ class PrismClient:
                                 refreshed_mapping[m_name] = inst_id
                     self._model_to_provider_cache = refreshed_mapping
                     self._last_config_fetch = now
+                else:
+                    # A failed discovery must not route a model using stale
+                    # provider data from an earlier deployment snapshot.
+                    self._model_to_provider_cache = {}
+                    self._last_config_fetch = now
+            else:
+                self._model_to_provider_cache = {}
+                self._last_config_fetch = now
         except Exception as e:
+            self._model_to_provider_cache = {}
+            self._last_config_fetch = time.time()
             logger.warning(f"[PRISM] Failed to auto-resolve provider for model '{model}': {e}")
 
         fallback = base_provider or "vllm"

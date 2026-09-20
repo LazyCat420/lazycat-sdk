@@ -1,4 +1,5 @@
 import json
+import secrets
 import pytest
 import respx
 import httpx
@@ -6,6 +7,9 @@ from pydantic import ValidationError
 
 from lazycat.models import (
     CreateRunRequest,
+    DecisionConstraints,
+    DecisionQuestion,
+    TypedDecisionRequest,
     RunBudget,
     RunEvent,
     RunEventType,
@@ -240,3 +244,72 @@ async def test_runtime_client_get_and_cancel_run():
     )
     cancelled = await client.cancel_run("run-123")
     assert cancelled is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_runtime_client_scoped_bearer_precedes_environment(monkeypatch):
+    env_credential = "auth_" + secrets.token_hex(12)
+    monkeypatch.setenv("INTERNAL_EXECUTE_TOKEN", env_credential)
+    route = respx.get("http://agent-test/v1/runs/run-scoped").respond(
+        status_code=200, json={"id": "run-scoped", "status": "completed", "messages": []}
+    )
+    client = RuntimeClient(base_url="http://agent-test/v1/runs", authorization_bearer="scoped-session")
+    await client.get_run("run-scoped")
+    request = route.calls.last.request
+    assert request.headers["authorization"] == "Bearer scoped-session"
+    assert "x-runtime-token" not in request.headers
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_runtime_client_decide_validates_and_posts_typed_request():
+    route = respx.post("http://agent-test/v1/runs/run-decision/decisions").respond(
+        status_code=200,
+        json={
+            "receipt_id": "decision-1", "request_id": "00000000-0000-4000-8000-000000000001",
+            "run_id": "run-decision", "agent_profile": "trading-analyst-v1", "policy_version": "shadow.v1",
+            "input_hash": "sha256-" + "a" * 64, "created_at": "2026-09-19T10:00:00Z",
+            "latency_ms": 3, "policy_outcome": "shadow_only", "authorizes_actions": False,
+            "fallback": "primary_llm"
+        }
+    )
+    request = TypedDecisionRequest(
+        request_id="00000000-0000-4000-8000-000000000001", run_id="run-decision",
+        question_id="agent.evidence_sufficiency.v1", state="{}",
+        questions={"insufficient_evidence": DecisionQuestion(instructions="Choose", criteria={"insufficient_evidence": "No", "ready": "Yes"})},
+        constraints=DecisionConstraints(max_latency_ms=100),
+    )
+    receipt = await RuntimeClient(base_url="http://agent-test/v1/runs").decide("run-decision", request)
+    assert receipt.fallback == "primary_llm"
+    payload = json.loads(route.calls.last.request.content)
+    assert payload["requestId"] == request.request_id
+    assert payload["constraints"]["shadowOnly"] is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_runtime_client_replays_events_without_requiring_terminal():
+    body = (
+        'id: evt-1\nevent: run.started\ndata: {"id":"evt-1","run_id":"run-replay","type":"run.started","timestamp":"2026-09-19T10:00:00Z","data":{}}\n\n'
+        'id: evt-2\nevent: message.delta\ndata: {"id":"evt-2","run_id":"run-replay","type":"message.delta","timestamp":"2026-09-19T10:00:01Z","data":{"delta":"hello"}}\n\n'
+    )
+    route = respx.get("http://agent-test/v1/runs/run-replay/events").respond(
+        status_code=200, content=body.encode(), headers={"Content-Type": "text/event-stream"}
+    )
+    events = [event async for event in RuntimeClient(base_url="http://agent-test/v1/runs").replay_events("run-replay", after="evt-0")]
+    assert [event.id for event in events] == ["evt-1", "evt-2"]
+    assert route.calls.last.request.headers["last-event-id"] == "evt-0"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_runtime_client_resolves_scoped_approval():
+    route = respx.post("http://agent-test/v1/runs/run-approval/approvals/approval-1").respond(
+        status_code=200, json={"ok": True, "status": "running"}
+    )
+    result = await RuntimeClient(base_url="http://agent-test/v1/runs").resolve_approval(
+        "run-approval", "approval-1", approved=True
+    )
+    assert result["ok"] is True
+    assert json.loads(route.calls.last.request.content) == {"approved": True}
