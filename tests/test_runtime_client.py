@@ -17,6 +17,7 @@ from lazycat.models import (
     RunUsage,
     StructuredError,
 )
+from lazycat.contract import WIRE_CONTRACT_SHA256, WIRE_CONTRACT_VERSION
 from lazycat.client import (
     RuntimeClient,
     RuntimeClientError,
@@ -264,6 +265,40 @@ async def test_runtime_client_get_and_cancel_run():
     )
     cancelled = await client.cancel_run("run-123")
     assert cancelled is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_contract_verification_mismatch_fails_before_run_post():
+    client = RuntimeClient(base_url="http://agent-test/v1/runs", verify_contract=True)
+    contract = respx.get("http://agent-test/v1/contracts/wire-schema").respond(
+        status_code=200, json={"contract_version": "runtime-wire.v0.0.0", "digest": "wrong"}
+    )
+    run = respx.post("http://agent-test/v1/runs").respond(status_code=200, json={"id": "never", "status": "completed", "messages": []})
+
+    with pytest.raises(RuntimeClientError, match="contract version mismatch"):
+        await client.create_run(CreateRunRequest(profile_id="test", input="no run"))
+
+    assert contract.called
+    assert not run.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_contract_verification_success_is_cached_per_client():
+    client = RuntimeClient(base_url="http://agent-test/v1/runs", verify_contract=True)
+    contract = respx.get("http://agent-test/v1/contracts/wire-schema").respond(
+        status_code=200, json={"contract_version": WIRE_CONTRACT_VERSION, "digest": WIRE_CONTRACT_SHA256}
+    )
+    run = respx.post("http://agent-test/v1/runs").respond(
+        status_code=200, json={"id": "run-ok", "status": "completed", "messages": []}
+    )
+
+    await client.create_run(CreateRunRequest(profile_id="test", input="one"))
+    await client.create_run(CreateRunRequest(profile_id="test", input="two"))
+
+    assert len(contract.calls) == 1
+    assert len(run.calls) == 2
 
 
 @pytest.mark.asyncio

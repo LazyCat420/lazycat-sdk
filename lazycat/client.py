@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator, Optional
 import httpx
 from pydantic import ValidationError
 from lazycat.generated_runtime_models import RunEvent as GeneratedRunEvent, RunResult as GeneratedRunResult
+from lazycat.contract import WIRE_CONTRACT_SHA256, WIRE_CONTRACT_VERSION
 
 from lazycat.models import (
     CreateRunRequest,
@@ -62,6 +63,7 @@ class RuntimeClient:
         client: Optional[httpx.AsyncClient] = None,
         authorization_bearer: Optional[str] = None,
         bearer: Optional[str] = None,
+        verify_contract: bool = False,
     ):
         raw_url = base_url or os.environ.get("AGENT_SERVICE_URL") or os.environ.get("LAZY_AGENT_URL") or "http://localhost:8080/v1/runs"
         raw_url = raw_url.rstrip("/")
@@ -74,6 +76,18 @@ class RuntimeClient:
         self._external_client = client
         # A scoped bearer always wins over environment backend credentials.
         self._authorization_bearer = (authorization_bearer or bearer or "").strip() or None
+        self.verify_contract = verify_contract
+        self._contract_checked = False
+        self._contract_lock = asyncio.Lock()
+
+    async def _ensure_contract(self) -> None:
+        if not self.verify_contract or self._contract_checked:
+            return
+        async with self._contract_lock:
+            if self._contract_checked:
+                return
+            await self.check_wire_compatibility(WIRE_CONTRACT_VERSION, WIRE_CONTRACT_SHA256)
+            self._contract_checked = True
 
     def _get_headers(self, idempotency_key: Optional[str] = None) -> dict[str, str]:
         headers = {
@@ -154,6 +168,7 @@ class RuntimeClient:
         Returns the terminal RunResult.
         """
         # Ensure non-streaming flag
+        await self._ensure_contract()
         req_data = request.model_dump(by_alias=False, exclude_none=True)
         req_data["stream"] = False
         headers = self._get_headers(idempotency_key=request.idempotency_key)
@@ -193,6 +208,7 @@ class RuntimeClient:
         POST /v1/runs with stream=True.
         Strictly decodes incoming SSE events into canonical RunEvent objects.
         """
+        await self._ensure_contract()
         req_data = request.model_dump(by_alias=False, exclude_none=True)
         req_data["stream"] = True
         headers = self._get_headers(idempotency_key=request.idempotency_key)
