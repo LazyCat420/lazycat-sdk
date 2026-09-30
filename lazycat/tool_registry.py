@@ -819,7 +819,7 @@ class ToolRegistry:
                     "name": func_name,
                     "content": json.dumps({
                         "error": f"Unauthorized ticker access. You are analyzing {context_ticker}, but you requested {tool_ticker}.",
-                        "hint": f"Only query data for the assigned ticker ({context_ticker})."
+                        "hint": f"Only query data for the assigned ticker ({context_ticker}). For peer/competitor comparisons, use screener_query with industry filters."
                     })
                 }
 
