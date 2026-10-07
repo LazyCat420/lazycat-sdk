@@ -47,8 +47,12 @@ DEFAULT_SCRAPER_URL = os.getenv("SCRAPER_SERVICE_URL", "http://10.0.0.16:8001")
 # Gold Spark (fast) for the single synthesis pass. Direct completion, no agent loop.
 DEFAULT_VLLM_URL = os.getenv("GROUNDED_VLLM_URL", os.getenv("VLLM_URL", "http://10.0.0.141:8000"))
 
-_MIN_SEARCH_INTERVAL = 1.5  # ddgs rate-limit guard
-_last_search = 0.0
+# News and web results come from lazy-agent-service: news_search (keyed news
+# APIs) and web_search (Exa's keyless index, one cache and rate limit for the
+# whole network). This module used to call the `ddgs` library, which scrapes
+# DuckDuckGo and, on a blocked IP, tries about nine engines per call; the free
+# search engines bot-block this network's one public IP.
+DEFAULT_SEARCH_SERVICE_URL = os.getenv("LAZY_TOOL_SERVICE_URL", "http://10.0.0.16:5591")
 
 _STOP = {"the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of", "is",
          "are", "was", "by", "with", "from", "as", "how", "why", "what", "s"}
@@ -70,57 +74,56 @@ def _parse_dt(s: str) -> Optional[datetime]:
         return None
     try:
         dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except Exception:
-        return None
+        # news_search dates are RFC 2822: "Sat, 05 Sep 2026 22:10:00 GMT".
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(str(s))
+        except Exception:
+            return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # ── Sources ────────────────────────────────────────────────────────────────
 
-async def _ddg_news(query: str, max_results: int) -> list[Article]:
-    global _last_search
-    wait = _MIN_SEARCH_INTERVAL - (time.monotonic() - _last_search)
-    if wait > 0:
-        await asyncio.sleep(wait)
+async def _execute(tool: str, body: dict) -> dict:
+    """POST to lazy-agent-service /execute/<tool>; {} when it cannot be reached."""
     try:
-        from ddgs import DDGS
-        def _do():
-            with DDGS() as d:
-                return list(d.news(query, max_results=max_results, timelimit="w"))
-        raw = await asyncio.to_thread(_do)
-        _last_search = time.monotonic()
+        async with httpx.AsyncClient(timeout=40.0) as client:
+            resp = await client.post(f"{DEFAULT_SEARCH_SERVICE_URL}/execute/{tool}", json=body)
+            return resp.json()
     except Exception as e:
-        logger.warning("ddg news failed for %r: %s", query[:50], e)
-        return []
+        logger.warning("%s via lazy-agent-service failed: %s", tool, e)
+        return {}
+
+
+async def _shared_news(query: str, max_results: int) -> list[Article]:
+    """lazy-agent-service news_search: keyed news APIs, real publisher URLs."""
+    payload = await _execute("news_search", {"topic": query, "limit": max_results})
     out = []
-    for r in raw:
+    for r in (payload.get("items") or [])[:max_results]:
         out.append(Article(
-            title=r.get("title", ""), url=r.get("url", r.get("href", "")),
-            snippet=r.get("body", r.get("excerpt", "")), source="ddg_news",
+            title=r.get("title", ""), url=r.get("url", ""),
+            snippet=r.get("snippet", ""), source="news_search",
             published_at=_parse_dt(r.get("date", ""))))
     return out
 
 
-async def _ddg_text(query: str, max_results: int) -> list[Article]:
-    global _last_search
-    wait = _MIN_SEARCH_INTERVAL - (time.monotonic() - _last_search)
-    if wait > 0:
-        await asyncio.sleep(wait)
-    try:
-        from ddgs import DDGS
-        def _do():
-            with DDGS() as d:
-                return list(d.text(query, max_results=max_results, timelimit="w"))
-        raw = await asyncio.to_thread(_do)
-        _last_search = time.monotonic()
-    except Exception as e:
-        logger.warning("ddg text failed for %r: %s", query[:50], e)
+async def _shared_web(query: str, max_results: int) -> list[Article]:
+    """lazy-agent-service web_search: Exa's keyless index, paced and cached for
+    the whole network. Anything but status "ok" means no results."""
+    payload = await _execute("web_search", {"query": query, "limit": max_results})
+    if payload.get("status") != "ok":
+        if payload:
+            logger.warning("web_search answered %s for %r: %s", payload.get("status"),
+                           query[:50], payload.get("error", ""))
         return []
     out = []
-    for r in raw:
+    for r in (payload.get("results") or [])[:max_results]:
         out.append(Article(
-            title=r.get("title", ""), url=r.get("href", r.get("link", "")),
-            snippet=r.get("body", r.get("snippet", "")), source="ddg_text"))
+            title=r.get("title", ""), url=r.get("url", ""),
+            snippet=r.get("snippet", ""), source="web_search",
+            published_at=_parse_dt(r.get("published", ""))))
     return out
 
 
@@ -338,8 +341,8 @@ async def grounded_research(
 
     # 1. fan out over sources concurrently
     layers = await asyncio.gather(
-        _ddg_news(query, 8),
-        _ddg_text(query, 8),
+        _shared_news(query, 8),
+        _shared_web(query, 8),
         _finnhub(query, ticker, 8),
         return_exceptions=True,
     )
@@ -368,7 +371,7 @@ async def grounded_research(
     context = format_for_context(articles)
     sources = [{"title": a.title[:140], "url": a.url,
                 # publisher = the site host (real publisher unknown); `source` keeps
-                # the retrieval layer (ddg_news/finnhub) for debugging.
+                # the retrieval layer (news_search/web_search/finnhub) for debugging.
                 "publisher": _host(a.url), "source": a.source,
                 "published": a.published_at.isoformat() if a.published_at else ""}
                for a in articles]
