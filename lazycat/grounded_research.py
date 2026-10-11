@@ -89,8 +89,10 @@ def _parse_dt(s: str) -> Optional[datetime]:
 async def _execute(tool: str, body: dict) -> dict:
     """POST to lazy-agent-service /execute/<tool>; {} when it cannot be reached."""
     try:
+        key = os.getenv("EXECUTE_API_KEY", "").strip()
+        headers = {"x-api-key": key} if key else None
         async with httpx.AsyncClient(timeout=40.0) as client:
-            resp = await client.post(f"{DEFAULT_SEARCH_SERVICE_URL}/execute/{tool}", json=body)
+            resp = await client.post(f"{DEFAULT_SEARCH_SERVICE_URL}/execute/{tool}", json=body, headers=headers)
             return resp.json()
     except Exception as e:
         logger.warning("%s via lazy-agent-service failed: %s", tool, e)

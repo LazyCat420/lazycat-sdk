@@ -1,6 +1,7 @@
 import httpx
 import logging
 import asyncio
+import os
 from typing import Any
 
 from lazycat.config import config
@@ -71,6 +72,12 @@ class ToolExecutor:
 
         payload = {"arguments": arguments}
         request_headers = {k: v for k, v in (headers or {}).items() if v}
+        # lazy-tool-service /execute requires EXECUTE_API_KEY once set server-side
+        # (W3 of the harness audit); a signed trading context is exempt. Harmless
+        # while the server key is unset.
+        execute_key = os.getenv("EXECUTE_API_KEY", "").strip()
+        if execute_key and "x-api-key" not in request_headers:
+            request_headers["x-api-key"] = execute_key
 
         max_retries = 3
         backoff = 1.0
