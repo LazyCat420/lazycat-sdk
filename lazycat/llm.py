@@ -450,7 +450,14 @@ class PrismClient:
         effective_harness = bench_harness or bench_harness_var.get() or "trading-cycle"
         effective_task = bench_task or bench_task_var.get()
             
-        if not config.PRISM_ENABLED:
+        # PRISM_ENABLED=false has two meanings:
+        #  * A caller that EXPLICITLY set prism_client.url (e.g. trading-service
+        #    BootService/PipelineService point it at lazy-agent-service's native
+        #    :5591) still wants the agentic harness — just native, never prism
+        #    :7777 or the /prism-proxy.
+        #  * A caller that never set a URL falls back to direct vLLM (the old
+        #    bypass), preserving standalone SDK behaviour.
+        if not config.PRISM_ENABLED and self._url is None:
             return await self._call_vllm_direct(
                 model=model,
                 messages=messages,

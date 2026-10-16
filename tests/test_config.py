@@ -8,10 +8,10 @@ def test_config_raises_on_missing_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
         
     config = Config()
-    assert config.PRISM_URL == "http://10.0.0.16:7777"
+    assert config.PRISM_URL == "http://10.0.0.16:5591"
     assert config.VAULT_SERVICE_URL == "http://10.0.0.16:5599"
     assert config.LAZY_AGENT_SERVICE_PORT == "5591"
-    assert config.PRISM_SERVICE_PORT == "7777"
+    assert config.PRISM_SERVICE_PORT == "5591"
 
 def test_config_loads_from_env(monkeypatch):
     monkeypatch.setenv("PRISM_URL", "http://prism")
