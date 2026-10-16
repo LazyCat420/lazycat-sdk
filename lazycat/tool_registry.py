@@ -966,7 +966,8 @@ class ToolRegistry:
             result = self._truncate_result(func_name, result)
 
             elapsed_ms = int((time.monotonic() - t0) * 1000)
-            self._log_usage(func_name, agent_name, True, elapsed_ms)
+            self._log_usage(func_name, agent_name, ticker, cycle_id,
+                            True, elapsed_ms)
 
             return {
                 "role": "tool",
@@ -979,7 +980,8 @@ class ToolRegistry:
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             logger.exception("[ToolRegistry] Tool execution failed for %s", func_name)
             service_source = "lazy-agent-service"
-            self._log_usage(func_name, agent_name, False, elapsed_ms, str(e))
+            self._log_usage(func_name, agent_name, ticker, cycle_id,
+                            False, elapsed_ms, str(e))
             return {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
@@ -1038,6 +1040,21 @@ class ToolRegistry:
         error_message = kwargs.get("error_message", error_message)
 
         import os
+
+        # One durable `tool_execution` span to the telemetry-service, on top of
+        # the rotating stdout line — a week of per-tool stats must survive
+        # log rotation (documentation/chapters/08-tool-metrics.md, takeaway 5).
+        from lazycat.tool_telemetry import emit_tool_execution_span
+
+        emit_tool_execution_span(
+            tool_name, agent_name,
+            success=success,
+            duration_ms=execution_ms,
+            error=error_message,
+            ticker=ticker,
+            cycle_id=cycle_id,
+        )
+
         if getattr(self, "_telemetry_callback", None):
             try:
                 self._telemetry_callback(tool_name, agent_name, success, execution_ms, error_message)
