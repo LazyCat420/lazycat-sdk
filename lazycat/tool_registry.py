@@ -8,6 +8,7 @@ Inspired by Claude Code's buildTool() pattern:
   - Permission levels gate destructive operations
 """
 
+import ast
 import inspect
 import json
 import logging
@@ -490,14 +491,22 @@ class ToolRegistry:
             # Models often send list/object arguments JSON-encoded as strings
             # (2026-10-16: screener_query got filters='["ticker:eq:AMZN"]').
             # Pydantic's lax mode does not decode those, so retry once with
-            # every string that parses to a JSON array/object decoded.
+            # every string that parses to a JSON array/object decoded. Python
+            # reprs are decoded too (2026-10-10: filters="['ticker:eq:MP']",
+            # single-quoted, which json.loads rejects) via ast.literal_eval,
+            # which only evaluates literals.
             decoded = dict(kwargs)
             for key, value in kwargs.items():
                 if isinstance(value, str) and value.lstrip()[:1] in ("[", "{"):
                     try:
                         decoded[key] = json.loads(value)
                     except ValueError:
-                        pass
+                        try:
+                            literal = ast.literal_eval(value.strip())
+                        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                            continue
+                        if isinstance(literal, (list, dict)):
+                            decoded[key] = literal
             if decoded == kwargs:
                 e = first
             else:

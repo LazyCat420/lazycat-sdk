@@ -54,3 +54,35 @@ def test_a_string_field_that_looks_like_json_is_left_alone():
 def test_still_invalid_after_decoding_raises():
     with pytest.raises(ValidationError):
         _registry()._validate_input("screener_query", {"filters": '{"not": "a list"}'})
+
+
+def test_python_repr_lists_are_decoded():
+    # 2026-10-10 junior: filters="['ticker:eq:MP']" — single quotes, not JSON.
+    out = _registry()._validate_input(
+        "screener_query",
+        {"filters": "['ticker:eq:MP']", "columns": "['rsi_14', 'earnings_date']"},
+    )
+    assert out == {"filters": ["ticker:eq:MP"], "columns": ["rsi_14", "earnings_date"], "limit": 10}
+
+
+def test_python_repr_dict_is_decoded():
+    class _Opts(BaseModel):
+        options: dict[str, int]
+
+    registry = ToolRegistry()
+
+    async def opts(options):
+        return options
+
+    registry.register(opts, input_model=_Opts)
+    assert registry._validate_input("opts", {"options": "{'a': 1, 'b': True}"}) == {
+        "options": {"a": 1, "b": 1}
+    }
+
+
+def test_repr_decode_never_evaluates_code_or_rescues_garbage():
+    # literal_eval refuses calls; a set literal is not a list; a malformed
+    # mixed string stays malformed — all still fail validation.
+    for bad in ("[__import__('os').getcwd()]", "{'ticker:eq:MP'}", "['ticker:eq:MP', columns=['x']]"):
+        with pytest.raises(ValidationError):
+            _registry()._validate_input("screener_query", {"filters": bad})
