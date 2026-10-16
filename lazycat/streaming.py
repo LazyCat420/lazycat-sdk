@@ -8,8 +8,8 @@ from lazycat.sse import format_sse, iter_sse_json
 
 logger = logging.getLogger(__name__)
 
-async def stream_prism_events(
-    prism_url: str,
+async def stream_agent_events(
+    agent_url: str,
     payload: dict,
     headers: dict,
     timeout: float = 600.0,
@@ -22,7 +22,7 @@ async def stream_prism_events(
         try:
             async with client.stream(
                 "POST",
-                prism_url,
+                agent_url,
                 json=payload,
                 headers={**headers, "Accept": "text/event-stream"}
             ) as resp:
@@ -30,7 +30,7 @@ async def stream_prism_events(
                     error_body = ""
                     async for chunk in resp.aiter_text():
                         error_body += chunk
-                    yield format_sse({"type": "error", "message": f"Prism error {resp.status_code}: {error_body[:500]}"})
+                    yield format_sse({"type": "error", "message": f"Agent error {resp.status_code}: {error_body[:500]}"})
                     return
 
                 async for event in iter_sse_json(resp.aiter_text()):
@@ -73,18 +73,18 @@ async def stream_prism_events(
                         yield format_sse({"type": "error", "message": event.get("message", "Agent error")})
 
         except Exception as e:
-            logger.error(f"Prism SSE proxy error: {e}")
+            logger.error(f"Agent SSE error: {e}")
             yield format_sse({"type": "error", "message": f"Connection error: {str(e)}"})
             yield 'data: {"type": "done"}\n\n'
 
 def create_streaming_response(
-    prism_url: str,
+    agent_url: str,
     payload: dict,
     headers: dict,
     timeout: float = 600.0,
 ) -> StreamingResponse:
     """Helper to wrap the Prism stream generator in a FastAPI StreamingResponse."""
     return StreamingResponse(
-        stream_prism_events(prism_url, payload, headers, timeout),
+        stream_agent_events(agent_url, payload, headers, timeout),
         media_type="text/event-stream"
     )

@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from lazycat.llm import (
-    PrismClient,
+    AgentClient,
     set_bench_context,
     get_bench_context,
     clear_bench_context,
@@ -9,8 +9,8 @@ from lazycat.llm import (
 
 @pytest.mark.asyncio
 async def test_call_agent_with_bench_headers_explicit():
-    client = PrismClient()
-    client.url = "http://prism"
+    client = AgentClient()
+    client.url = "http://agent"
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -49,8 +49,8 @@ async def test_call_agent_with_bench_context_propagation():
         task="screen",
     )
 
-    client = PrismClient()
-    client.url = "http://prism"
+    client = AgentClient()
+    client.url = "http://agent"
 
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -74,43 +74,5 @@ async def test_call_agent_with_bench_context_propagation():
 
         payload = kwargs.get("json", {})
         assert payload.get("user") == "tc-2026-09-03T22:00:00Z"
-
-    clear_bench_context()
-
-
-@pytest.mark.asyncio
-async def test_call_vllm_direct_with_bench_headers():
-    clear_bench_context()
-    set_bench_context(
-        run_id="tc-direct-123",
-        harness="trading-cycle",
-        task="decide:MSFT",
-    )
-
-    client = PrismClient()
-
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.json.return_value = {
-        "choices": [{"message": {"content": "Buy MSFT", "tool_calls": []}}]
-    }
-
-    with patch("httpx.AsyncClient.post", return_value=mock_resp) as mock_post:
-        await client._call_vllm_direct(
-            model="deepseek-v4-flash",
-            messages=[{"role": "user", "content": "decide MSFT"}],
-            system_prompt="sys prompt",
-        )
-
-        mock_post.assert_called_once()
-        args, kwargs = mock_post.call_args
-
-        headers = kwargs.get("headers", {})
-        assert headers.get("X-Bench-Harness") == "trading-cycle"
-        assert headers.get("X-Bench-Run") == "tc-direct-123"
-        assert headers.get("X-Bench-Task") == "decide:MSFT"
-
-        payload = kwargs.get("json", {})
-        assert payload.get("user") == "tc-direct-123"
 
     clear_bench_context()

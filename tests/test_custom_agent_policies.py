@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from lazycat.llm import PrismClient
+from lazycat.llm import AgentClient
 
 
 def _mock_client(captured: dict):
@@ -46,11 +46,11 @@ def _mock_client(captured: dict):
 
 async def _register(**kwargs) -> dict:
     captured: dict = {}
-    prism = PrismClient()
+    client = AgentClient()
     with patch.object(
-        PrismClient, "_get_client", new=AsyncMock(return_value=_mock_client(captured))
+        AgentClient, "_get_client", new=AsyncMock(return_value=_mock_client(captured))
     ):
-        await prism.register_or_update_custom_agent(
+        await client.register_or_update_custom_agent(
             name="v3_quant_analyst",
             identity="test identity",
             **kwargs,

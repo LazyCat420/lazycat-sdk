@@ -5,7 +5,7 @@ The parsing loop these helpers replace was copy-pasted across llm.py,
 streaming.py, research.py and agent.py. The tests below pin the exact
 semantics of those originals (strip, skip empties, tolerate garbage, drop a
 trailing partial line) plus characterization tests asserting the frames
-emitted by stream_prism_events are unchanged by the consolidation.
+emitted by stream_agent_events are unchanged by the consolidation.
 """
 import json
 
@@ -117,11 +117,11 @@ def test_format_sse_frames():
     assert "\\n" not in format_sse({"a": 1})
 
 
-# ── characterization: stream_prism_events output is unchanged ───────────
+# ── characterization: stream_agent_events output is unchanged ───────────
 
 
 @pytest.mark.asyncio
-async def test_stream_prism_events_frames_unchanged():
+async def test_stream_agent_events_frames_unchanged():
     """Pins the exact frames the SSE proxy emits for a representative stream."""
     from unittest.mock import MagicMock, patch
 
@@ -166,7 +166,7 @@ async def test_stream_prism_events_frames_unchanged():
     with patch.object(streaming.httpx, "AsyncClient", lambda **kw: _Client()):
         frames = [
             f
-            async for f in streaming.stream_prism_events("http://x/agent", {}, {})
+            async for f in streaming.stream_agent_events("http://x/agent", {}, {})
         ]
 
     assert frames == [

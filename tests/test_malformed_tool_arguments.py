@@ -124,7 +124,7 @@ async def test_a_malformed_call_never_reaches_the_executor():
         yield "data: [DONE]"
     second.aiter_lines = _second
 
-    with patch("lazycat.agent.prism_client.call_agent", new_callable=AsyncMock) as mock_call, \
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call, \
          patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec:
         mock_call.side_effect = [first, second]
         mock_exec.return_value = {"status": "ok"}

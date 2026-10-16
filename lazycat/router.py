@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
-from lazycat.llm import PrismClient
+from lazycat.llm import AgentClient
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +16,9 @@ class IntentRouter:
     based on predefined intent definitions.
     """
     
-    def __init__(self, intents: List[IntentDefinition], llm_client: Optional[PrismClient] = None):
+    def __init__(self, intents: List[IntentDefinition], llm_client: Optional[AgentClient] = None):
         self.intents = intents
-        self.llm_client = llm_client or PrismClient()
+        self.llm_client = llm_client or AgentClient()
         
     def _build_system_prompt(self) -> str:
         intent_list = "\n".join([f"{i+1}. {intent.name}: {intent.description}" for i, intent in enumerate(self.intents)])

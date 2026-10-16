@@ -8,11 +8,9 @@ def get_env_or_raise(key: str) -> str:
 
 class Config:
     @property
-    def PRISM_URL(self):
-        # Default to lazy-agent-service's NATIVE gateway (:5591), not prism
-        # (:7777). Prism is only reachable when the caller explicitly points
-        # PRISM_URL at the prism-proxy with PRISM_ENABLED=true.
-        return os.getenv("PRISM_URL", "http://10.0.0.16:5591")
+    def LAZY_AGENT_URL(self):
+        # lazy-agent-service native gateway.
+        return os.getenv("LAZY_AGENT_URL", "http://10.0.0.16:5591")
 
     @property
     def VAULT_SERVICE_URL(self):
@@ -21,24 +19,6 @@ class Config:
     @property
     def LAZY_AGENT_SERVICE_PORT(self):
         return os.getenv("LAZY_AGENT_SERVICE_PORT", "5591")
-
-    @property
-    def PRISM_SERVICE_PORT(self):
-        # Retired prism port. The gateway callers actually reach is
-        # lazy-agent-service on 5591; kept overridable for legacy consumers.
-        return os.getenv("PRISM_SERVICE_PORT", "5591")
-
-    @property
-    def PRISM_ENABLED(self) -> bool:
-        return os.getenv("PRISM_ENABLED", "True").lower() == "true"
-
-    @property
-    def JETSON_VLLM_URL(self) -> str:
-        return os.getenv("JETSON_VLLM_URL", "http://10.0.0.30:8000")
-
-    @property
-    def DGX_SPARK_VLLM_URL(self) -> str:
-        return os.getenv("DGX_SPARK_VLLM_URL", "http://10.0.0.141:8000")
 
     @property
     def PROJECT_NAME(self) -> str:

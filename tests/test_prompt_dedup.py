@@ -8,13 +8,13 @@ import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from lazycat.agent import BaseAgent, AgentHarness
 from lazycat.session import ConversationSession
-from lazycat.llm import PrismClient
+from lazycat.llm import AgentClient
 
 
 @pytest.mark.asyncio
 async def test_call_agent_does_not_duplicate_system_prompt_in_messages():
-    client = PrismClient()
-    client.url = "http://fake-prism:8000"
+    client = AgentClient()
+    client.url = "http://fake-agent:8000"
     
     mock_post = MagicMock()
     mock_post.status_code = 200
@@ -63,7 +63,7 @@ async def test_agent_harness_passes_inline_system_prompt_false():
         yield "data: [DONE]"
     mock_resp.aiter_lines = mock_aiter_lines
     
-    with patch("lazycat.agent.prism_client.call_agent", new_callable=AsyncMock) as mock_call:
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call:
         mock_call.return_value = mock_resp
         await harness.run("evaluate")
         

@@ -1,5 +1,13 @@
 # lazycat-sdk
 
+## Agent client (2026-10-16)
+
+`lazycat.agent_client` (an `AgentClient`) talks only to lazy-agent-service. Its base URL is
+`LAZY_AGENT_URL` (default `http://10.0.0.16:5591`); set `agent_client.url = ...` to override per
+process. The old `prism_client` / `PrismClient` names, `PRISM_URL`, `PRISM_ENABLED`, the `:7777`
+default, the `/prism-proxy` path and the direct-vLLM bypass were removed. Model-to-provider
+resolution reads `{LAZY_AGENT_URL}/config`.
+
 ## grounded_research: where results come from (2026-10-06)
 
 `lazycat.grounded_research` gathers sources from three places:

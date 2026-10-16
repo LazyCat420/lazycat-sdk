@@ -3,13 +3,13 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 from lazycat.agent import BaseAgent, AgentHarness
-from lazycat.llm import PrismClient
+from lazycat.llm import AgentClient
 from lazycat.session import ConversationSession
 
 
 @pytest.mark.asyncio
 async def test_explicit_provider_wins_over_same_model_on_another_box():
-    client = PrismClient()
+    client = AgentClient()
     client._model_to_provider_cache["same-model"] = "vllm-2"
     assert await client._resolve_provider_instance("same-model", "vllm") == "vllm"
     assert await client._resolve_provider_instance("same-model", "vllm-2") == "vllm-2"
@@ -18,7 +18,7 @@ async def test_explicit_provider_wins_over_same_model_on_another_box():
 @pytest.mark.asyncio
 async def test_default_provider_resolves_via_model_cache():
     """When provider/base_provider is omitted or None, dynamic resolution via cache/config takes effect."""
-    client = PrismClient()
+    client = AgentClient()
     import time
     client._last_config_fetch = time.time()
     client._model_to_provider_cache["GLM-5.3-Flash-EXL3"] = "vllm-2"
@@ -28,7 +28,7 @@ async def test_default_provider_resolves_via_model_cache():
 
 @pytest.mark.asyncio
 async def test_default_provider_falls_back_to_vllm_if_unknown():
-    client = PrismClient()
+    client = AgentClient()
     import time
     client._last_config_fetch = time.time()
     assert await client._resolve_provider_instance("unknown-model", None) == "vllm"
@@ -36,9 +36,9 @@ async def test_default_provider_falls_back_to_vllm_if_unknown():
 
 def test_signatures_default_provider_to_none():
     import inspect
-    sig_call = inspect.signature(PrismClient.call_agent)
+    sig_call = inspect.signature(AgentClient.call_agent)
     assert sig_call.parameters["provider"].default is None
-    sig_stream = inspect.signature(PrismClient.agent_chat_stream)
+    sig_stream = inspect.signature(AgentClient.agent_chat_stream)
     assert sig_stream.parameters["provider"].default is None
 
 
@@ -73,7 +73,7 @@ async def test_cancellation_keeps_last_cumulative_usage_snapshot_once():
 
 @pytest.mark.asyncio
 async def test_expired_discovery_replaces_moved_and_removed_models():
-    client = PrismClient()
+    client = AgentClient()
     client._model_to_provider_cache = {"moved": "old-endpoint", "removed": "old-endpoint"}
     response = MagicMock(status_code=200)
     response.json.return_value = {"textToText": {"models": {"new-endpoint": [{"name": "moved"}]}}}
@@ -87,7 +87,7 @@ async def test_expired_discovery_replaces_moved_and_removed_models():
 
 @pytest.mark.asyncio
 async def test_failed_discovery_does_not_use_stale_provider_cache():
-    client = PrismClient()
+    client = AgentClient()
     client._model_to_provider_cache = {"stale-model": "old-endpoint"}
     response = MagicMock(status_code=503)
     transport = MagicMock()

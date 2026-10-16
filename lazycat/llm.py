@@ -42,41 +42,6 @@ def clear_bench_context() -> None:
 _REASONING_FIELDS = ("reasoning", "reasoning_content")
 
 
-def text_from_message(msg: dict) -> str:
-    """The assistant text, falling back to a reasoning field when empty.
-
-    MEASURED on the live jetson engine, model `nemotron35`:
-
-        content    None
-        reasoning  "Here's a thinking process: ..."
-        finish_reason: length      usage: completion_tokens=64
-
-    A reasoning model puts its generation in `reasoning` and leaves `content`
-    null. Reading only `content` returned "" and the caller logged
-    `EMPTY RESPONSE ... raw=''` — 87 times across 32 cycles in one week, 53 of
-    them this model. The completion is NOT empty (64 completion tokens), so the
-    zero-usage truncation guard cannot see it either.
-
-    `content` always wins, so a normal model is completely unaffected; a
-    non-string reasoning block is ignored rather than stringified.
-
-    ⚠ This is a repair, not a cure. `finish_reason: "length"` means the model
-    spent its whole budget thinking and never reached an answer, so the text
-    recovered here is a truncated thought. Surfacing it makes "reasoned for 64
-    tokens and ran out" diagnosable, where `raw=''` was not.
-    """
-    if not isinstance(msg, dict):
-        return ""
-    content = msg.get("content")
-    if isinstance(content, str) and content:
-        return content
-    for field in _REASONING_FIELDS:
-        value = msg.get(field)
-        if isinstance(value, str) and value:
-            return value
-    return ""
-
-
 class LLMStreamWrapper:
     def __init__(self, response: httpx.Response, is_openai: bool = False):
         self.response = response
@@ -192,10 +157,10 @@ class LLMResponseWrapper:
         pass
 
 
-class PrismClient:
+class AgentClient:
     """
-    Standalone SDK client for routing LLM requests through Prism Gateway.
-    Handles session tracking, timeouts, and payload enrichment for Prism's /agent endpoint.
+    Standalone SDK client for routing LLM requests through lazy-agent-service.
+    Handles session tracking, timeouts, and payload enrichment for the /agent endpoint.
     """
 
     def __init__(self):
@@ -213,7 +178,7 @@ class PrismClient:
 
     @property
     def url(self) -> str:
-        return self._url if self._url is not None else config.PRISM_URL
+        return self._url if self._url is not None else config.LAZY_AGENT_URL
 
     @url.setter
     def url(self, value: str):
@@ -232,16 +197,16 @@ class PrismClient:
                     # No running loop, let garbage collection handle it
                     pass
             except Exception as e:
-                logger.warning(f"[PrismClient] Failed to schedule client close: {e}")
+                logger.warning(f"[AgentClient] Failed to schedule client close: {e}")
             self._client = None
-        logger.warning("[PrismClient] Kill switch ARMED")
+        logger.warning("[AgentClient] Kill switch ARMED")
 
     def reset_kill_switch(self):
         """Re-enables LLM requests."""
         self._kill_switch_armed = False
         self._model_to_provider_cache.clear()
         self._last_config_fetch = 0.0
-        logger.info("[PrismClient] Kill switch RESET")
+        logger.info("[AgentClient] Kill switch RESET")
 
     def _prepare_messages(
         self,
@@ -270,7 +235,7 @@ class PrismClient:
         return new_messages
 
     async def check_health(self) -> bool:
-        """Dynamically check if Prism is available."""
+        """Dynamically check if the agent service is available."""
         import time
         now = time.monotonic()
 
@@ -292,7 +257,7 @@ class PrismClient:
 
     async def _resolve_provider_instance(self, model: str, base_provider: str | None = None) -> str:
         """
-        Query /config?includeLocal=true from Prism to discover which specific provider
+        Query /config?includeLocal=true from lazy-agent-service to discover which specific provider
         instance (e.g., 'vllm-2') holds the requested model.
         Falls back to base_provider if not found.
         """
@@ -317,7 +282,7 @@ class PrismClient:
                 url = self.url.rstrip("/")
                 config_url = f"{url}/config?includeLocal=true"
                 
-                logger.info(f"[PRISM] Fetching config to resolve model '{model}' from: {config_url}")
+                logger.info(f"[agent] Fetching config to resolve model '{model}' from: {config_url}")
                 response = await client.get(config_url, timeout=5.0)
                 if response.status_code == 200:
                     data = response.json()
@@ -342,11 +307,11 @@ class PrismClient:
         except Exception as e:
             self._model_to_provider_cache = {}
             self._last_config_fetch = time.time()
-            logger.warning(f"[PRISM] Failed to auto-resolve provider for model '{model}': {e}")
+            logger.warning(f"[agent] Failed to auto-resolve provider for model '{model}': {e}")
 
         fallback = base_provider or "vllm"
         resolved = self._model_to_provider_cache.get(model, fallback)
-        logger.info(f"[PRISM] Resolved model '{model}' to provider instance '{resolved}' (fallback: '{fallback}')")
+        logger.info(f"[agent] Resolved model '{model}' to provider instance '{resolved}' (fallback: '{fallback}')")
         return resolved
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -416,7 +381,7 @@ class PrismClient:
         bench_run_id: str | None = None,
         bench_task: str | None = None,
     ) -> Any:
-        """Execute a call to Prism's /agent endpoint, or directly to vLLM if Prism is disabled.
+        """Execute a call to the agent service's /agent endpoint.
 
         thinking_enabled: None leaves the gateway default (thinking ON for
         local models on agent sessions); pass False on interactive paths where
@@ -450,27 +415,6 @@ class PrismClient:
         effective_harness = bench_harness or bench_harness_var.get() or "trading-cycle"
         effective_task = bench_task or bench_task_var.get()
             
-        # PRISM_ENABLED=false has two meanings:
-        #  * A caller that EXPLICITLY set prism_client.url (e.g. trading-service
-        #    BootService/PipelineService point it at lazy-agent-service's native
-        #    :5591) still wants the agentic harness — just native, never prism
-        #    :7777 or the /prism-proxy.
-        #  * A caller that never set a URL falls back to direct vLLM (the old
-        #    bypass), preserving standalone SDK behaviour.
-        if not config.PRISM_ENABLED and self._url is None:
-            return await self._call_vllm_direct(
-                model=model,
-                messages=messages,
-                system_prompt=system_prompt,
-                tools=tools,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                stream=stream,
-                bench_harness=effective_harness,
-                bench_run_id=effective_run_id,
-                bench_task=effective_task,
-            )
-
         client = await self._get_client()
         
         session_suffix = ""
@@ -545,7 +489,7 @@ class PrismClient:
                     enabled_tools.append(t["name"])
             payload["enabledTools"] = enabled_tools
 
-        # Always force a new session on Prism proxy to prevent it from accumulating
+        # Always force a new session to prevent it from accumulating
         # duplicate history (since lazycat-sdk manages the conversation history locally).
         payload["createSession"] = True
 
@@ -561,7 +505,7 @@ class PrismClient:
             if effective_task:
                 headers["X-Bench-Task"] = effective_task
 
-        logger.debug(f"[INSTRUMENTATION] prism.call_agent attempting to connect to: {url}")
+        logger.debug(f"[INSTRUMENTATION] agent_client.call_agent attempting to connect to: {url}")
         try:
             if stream:
                 req = client.build_request("POST", url, json=payload, headers=headers)
@@ -577,107 +521,7 @@ class PrismClient:
                 # token usage or content.
                 return r
         except Exception as e:
-            logger.error(f"[INSTRUMENTATION] Prism call failed connecting to {url}. Error: {e.__class__.__name__} - {e}")
-            raise
-
-    async def _call_vllm_direct(
-        self,
-        model: str,
-        messages: list[dict],
-        system_prompt: str,
-        tools: list[dict] | None = None,
-        max_tokens: int = 8192,
-        temperature: float = 0.0,
-        stream: bool = False,
-        bench_harness: str | None = None,
-        bench_run_id: str | None = None,
-        bench_task: str | None = None,
-    ) -> Any:
-        client = await self._get_client()
-
-        effective_run_id = bench_run_id or bench_run_id_var.get()
-        effective_harness = bench_harness or bench_harness_var.get() or "trading-cycle"
-        effective_task = bench_task or bench_task_var.get()
-        
-        is_qwen = "qwen" in model.lower()
-        vllm_base = config.JETSON_VLLM_URL if is_qwen else config.DGX_SPARK_VLLM_URL
-        url = f"{vllm_base}/v1/chat/completions"
-        
-        openai_messages = []
-        if system_prompt:
-            openai_messages.append({"role": "system", "content": system_prompt})
-            
-        for m in messages:
-            if m.get("role") != "system":
-                openai_messages.append({
-                    "role": m.get("role"),
-                    "content": m.get("content") or ""
-                })
-                
-        payload = {
-            "model": model,
-            "messages": openai_messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": stream,
-        }
-        if effective_run_id:
-            payload["user"] = effective_run_id
-        
-        if tools:
-            openai_tools = []
-            for t in tools:
-                if "function" in t:
-                    openai_tools.append(t)
-                elif "name" in t:
-                    openai_tools.append({
-                        "type": "function",
-                        "function": {
-                            "name": t.get("name"),
-                            "description": t.get("description", ""),
-                            "parameters": t.get("parameters", {"type": "object", "properties": {}, "required": []})
-                        }
-                    })
-            if openai_tools:
-                payload["tools"] = openai_tools
-                payload["tool_choice"] = "auto"
-                
-        headers = {"Content-Type": "application/json"}
-        if effective_run_id:
-            headers["X-Bench-Harness"] = effective_harness
-            headers["X-Bench-Run"] = effective_run_id
-            if effective_task:
-                headers["X-Bench-Task"] = effective_task
-
-        logger.info(f"[SDK direct-vLLM] completions endpoint: {url} (stream={stream})")
-        
-        try:
-            if stream:
-                req = client.build_request("POST", url, json=payload, headers=headers)
-                r = await client.send(req, stream=True)
-                r.raise_for_status()
-                return LLMStreamWrapper(r, is_openai=True)
-            else:
-                r = await client.post(url, json=payload, headers=headers, timeout=600.0)
-                r.raise_for_status()
-                res_data = r.json()
-                choice = res_data["choices"][0]
-                msg = choice.get("message", {})
-                text = text_from_message(msg)
-                
-                tool_calls = []
-                if "tool_calls" in msg and msg["tool_calls"]:
-                    for tc in msg["tool_calls"]:
-                        tool_calls.append({
-                            "id": tc.get("id", ""),
-                            "function": {
-                                "name": tc.get("function", {}).get("name", ""),
-                                "arguments": tc.get("function", {}).get("arguments", "{}")
-                            }
-                        })
-                return LLMResponseWrapper(text, tool_calls)
-        except Exception as e:
-            logger.error(f"[SDK direct-vLLM] completions failed: {e}")
+            logger.error(f"[INSTRUMENTATION] Agent call failed connecting to {url}. Error: {e.__class__.__name__} - {e}")
             raise
 
     def _get_agent_lock(self, agent_id: str) -> asyncio.Lock:
@@ -696,7 +540,7 @@ class PrismClient:
         thinking_default: bool | None = None,
         policies: list[dict] | None = None,
     ) -> str:
-        """Register a custom agent in Prism, or update it if it already exists.
+        """Register a custom agent in lazy-agent-service, or update it if it already exists.
         Returns the custom agent ID (e.g. 'CUSTOM_BEAR_MACRO_SENTIMENT_T2_AGENT').
         """
         slug = name.upper().replace(" ", "_").replace("-", "_").strip("_")
@@ -732,7 +576,7 @@ class PrismClient:
                         agent_db_id = agent.get("_id")
                         break
             except Exception as e:
-                logger.warning(f"[PRISM] Failed to query existing custom agents: {e}")
+                logger.warning(f"[agent] Failed to query existing custom agents: {e}")
 
             display_name = name.replace("_", " ").title() if "_" in name else name
 
@@ -788,19 +632,19 @@ class PrismClient:
 
             if agent_db_id:
                 try:
-                    logger.info(f"[PRISM] Updating existing custom agent {agent_id} (db_id: {agent_db_id})")
+                    logger.info(f"[agent] Updating existing custom agent {agent_id} (db_id: {agent_db_id})")
                     r = await client.put(f"{self.url}/custom-agents/{agent_db_id}", json=payload, headers=headers, timeout=10.0)
                     r.raise_for_status()
                 except Exception as e:
-                    logger.error(f"[PRISM] Failed to update custom agent {agent_id}: {e}")
+                    logger.error(f"[agent] Failed to update custom agent {agent_id}: {e}")
                     raise
             else:
                 try:
-                    logger.info(f"[PRISM] Creating new custom agent {agent_id}")
+                    logger.info(f"[agent] Creating new custom agent {agent_id}")
                     r = await client.post(f"{self.url}/custom-agents", json=payload, headers=headers, timeout=10.0)
                     r.raise_for_status()
                 except Exception as e:
-                    logger.error(f"[PRISM] Failed to create custom agent {agent_id}: {e}")
+                    logger.error(f"[agent] Failed to create custom agent {agent_id}: {e}")
                     raise
 
             self._registered_custom_agents.add(agent_id)
@@ -830,7 +674,7 @@ class PrismClient:
         inline_system_prompt: bool = True,
         auto_approve: bool | None = None,
     ) -> tuple[dict, str, dict]:
-        """Returns (payload, url, headers) formatted for Prism /agent streaming.
+        """Returns (payload, url, headers) formatted for /agent streaming.
 
         See `call_agent` for what min_p / disabled_tools / workspace_enabled /
         inline_system_prompt do — the semantics are identical on both paths.
@@ -888,7 +732,7 @@ class PrismClient:
                     enabled_tools.append(t)
             payload["enabledTools"] = enabled_tools
 
-        # Always force a new session on Prism proxy to prevent it from accumulating
+        # Always force a new session to prevent it from accumulating
         # duplicate history (since lazycat-sdk manages the conversation history locally).
         payload["createSession"] = True
 
@@ -925,7 +769,7 @@ class PrismClient:
         auto_approve: bool | None = None,
         conversation_id: str | None = None,
     ):
-        """High-level wrapper to stream Prism /agent response.
+        """High-level wrapper to stream /agent response.
 
         enable_thinking defaults to None (defer to the gateway) rather than
         False, so callers that never set it keep their existing behaviour now
@@ -970,7 +814,7 @@ class PrismClient:
 
         from urllib.parse import urlsplit
         endpoint = urlsplit(url)
-        logger.info("[PRISM] stream conversation=%s model=%s provider=%s endpoint=%s%s tools=%s max_output=%s",
+        logger.info("[agent] stream conversation=%s model=%s provider=%s endpoint=%s%s tools=%s max_output=%s",
                     conversation_id, model, resolved_provider, endpoint.hostname, endpoint.path,
                     len(tools or []), max_tokens)
         client = await self._get_client()
@@ -981,7 +825,7 @@ class PrismClient:
                     if line:
                         yield line
         except Exception as e:
-            logger.error("[PRISM] Error in agent_chat_stream: %s", e)
+            logger.error("[agent] Error in agent_chat_stream: %s", e)
             raise
 
-prism_client = PrismClient()
+agent_client = AgentClient()

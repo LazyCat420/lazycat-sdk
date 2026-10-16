@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any, Callable
 
-from lazycat.llm import prism_client
+from lazycat.llm import agent_client
 from lazycat.tools import tool_executor
 from lazycat.session import ConversationSession
 from lazycat.sse import format_sse, iter_sse_json_lines, iter_sse_lines
@@ -195,7 +195,7 @@ class BaseAgent:
         self.project = project
         self.username = username
         self.tools: list[dict] = []
-        self.llm_client = llm_client or prism_client
+        self.llm_client = llm_client or agent_client
         self.auto_approve = auto_approve
         # None defers to prism's ParameterRegistry, which carries
         # `minP: agentDefault 0.05` — and vLLM REFUSES any min_p > 0 when
@@ -362,7 +362,7 @@ class AgentHarness:
                         )
                         if arg_error:
                             logger.warning(
-                                f"[{self.agent.name}] Prism-internal {func_name} "
+                                f"[{self.agent.name}] agent-internal {func_name} "
                                 f"had undecodable arguments; telemetry will "
                                 f"record none: {arg_error.splitlines()[0]}"
                             )
@@ -407,7 +407,7 @@ class AgentHarness:
                         if data.get("provider"):
                             self.last_provider = data["provider"]
                     elif event_type == "error":
-                        logger.error(f"Prism stream error: {data.get('message')}")
+                        logger.error(f"Agent stream error: {data.get('message')}")
                     elif "text" in data and not event_type:
                         content = data.get("text", content)
                         tool_calls = data.get("toolCalls", tool_calls)
@@ -637,7 +637,7 @@ class AgentHarness:
                     error_body = ""
                     async for chunk in resp.aiter_text():
                         error_body += chunk
-                    yield format_sse({"type": "error", "message": f"Prism error {resp.status_code}: {error_body[:500]}"})
+                    yield format_sse({"type": "error", "message": f"Agent error {resp.status_code}: {error_body[:500]}"})
                     return
 
                 async for line in iter_sse_lines(resp.aiter_text()):

@@ -109,7 +109,7 @@ async def test_harness_sends_max_iterations_over_the_wire():
 
     mock_resp.aiter_lines = mock_aiter_lines
 
-    with patch("lazycat.agent.prism_client.call_agent", new_callable=AsyncMock) as mock_call:
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call:
         mock_call.return_value = mock_resp
         await harness.run("Hello")
 

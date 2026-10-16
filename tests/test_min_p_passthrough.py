@@ -1,6 +1,6 @@
 """AgentHarness must forward BaseAgent.min_p to call_agent.
 
-WHY THIS EXISTS. `PrismClient.call_agent` has always accepted `min_p`, but
+WHY THIS EXISTS. `AgentClient.call_agent` has always accepted `min_p`, but
 `AgentHarness.run` never passed it, so no BaseAgent-based caller could set it.
 Prism's ParameterRegistry then filled its own `minP: agentDefault 0.05`, and a
 vLLM box running speculative decoding REFUSES any `min_p > 0`:

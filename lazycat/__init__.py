@@ -1,4 +1,4 @@
-from .llm import prism_client, PrismClient, LLMStreamWrapper, LLMResponseWrapper
+from .llm import agent_client, AgentClient, LLMStreamWrapper, LLMResponseWrapper
 from .research import research
 from .grounded_research import grounded_research
 from .llm_json import (
@@ -40,8 +40,8 @@ from .client import (
 __version__ = "0.4.0"
 
 __all__ = [
-    "prism_client",
-    "PrismClient",
+    "agent_client",
+    "AgentClient",
     "LLMStreamWrapper",
     "LLMResponseWrapper",
     "research",

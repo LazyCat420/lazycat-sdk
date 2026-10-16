@@ -20,7 +20,7 @@ async def test_agent_harness_terminates_cleanly():
     
     mock_resp.aiter_lines = mock_aiter_lines
     
-    with patch("lazycat.agent.prism_client.call_agent", new_callable=AsyncMock) as mock_call:
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call:
         mock_call.return_value = mock_resp
         result = await harness.run("Hello")
         
@@ -56,7 +56,7 @@ async def test_agent_harness_captures_resolved_model_from_done_event():
 
     assert harness.last_model is None
     assert harness.last_provider is None
-    with patch("lazycat.agent.prism_client.call_agent", new_callable=AsyncMock) as mock_call:
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call:
         mock_call.return_value = mock_resp
         await harness.run("Hello")
 
@@ -83,7 +83,7 @@ async def test_done_event_without_model_keeps_previous_value():
 
     mock_resp.aiter_lines = mock_aiter_lines
 
-    with patch("lazycat.agent.prism_client.call_agent", new_callable=AsyncMock) as mock_call:
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call:
         mock_call.return_value = mock_resp
         await harness.run("Hello")
 
@@ -117,7 +117,7 @@ async def test_agent_harness_tool_call():
     mock_resp2.aiter_lines = mock_aiter_lines2
     
     # Mock execute_tool to return a simple dummy result
-    with patch("lazycat.agent.prism_client.call_agent", new_callable=AsyncMock) as mock_call, \
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call, \
          patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec:
         
         mock_call.side_effect = [mock_resp1, mock_resp2]
