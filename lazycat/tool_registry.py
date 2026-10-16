@@ -485,16 +485,33 @@ class ToolRegistry:
             return kwargs
 
         try:
-            validated = meta.input_model(**kwargs)
-            return validated.model_dump()
-        except ValidationError as e:
+            return meta.input_model(**kwargs).model_dump()
+        except ValidationError as first:
+            # Models often send list/object arguments JSON-encoded as strings
+            # (2026-10-16: screener_query got filters='["ticker:eq:AMZN"]').
+            # Pydantic's lax mode does not decode those, so retry once with
+            # every string that parses to a JSON array/object decoded.
+            decoded = dict(kwargs)
+            for key, value in kwargs.items():
+                if isinstance(value, str) and value.lstrip()[:1] in ("[", "{"):
+                    try:
+                        decoded[key] = json.loads(value)
+                    except ValueError:
+                        pass
+            if decoded == kwargs:
+                e = first
+            else:
+                try:
+                    return meta.input_model(**decoded).model_dump()
+                except ValidationError as second:
+                    e = second
             logger.warning(
                 "[ToolRegistry] Input validation FAILED for %s: %s | raw kwargs: %s",
                 func_name,
                 e.error_count(),
                 kwargs,
             )
-            raise
+            raise e from None
 
     def _schema_params(self, func_name: str) -> tuple[set[str], set[str]]:
         """Declared (properties, required) parameter names for a tool.
