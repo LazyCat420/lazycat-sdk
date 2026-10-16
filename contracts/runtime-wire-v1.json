@@ -1,6 +1,6 @@
 {
   "contract_version": "runtime-wire.v1.0.0",
-  "digest": "sha256-de254c9c95a74bb1a3e13f21b33527cbd993a45a7cca40bdac36eedd9a79f84a",
+  "digest": "sha256-68d619084069c643ccfc3a3cb845644097b644bbccd9bbcdb0c7ee12b589e7d1",
   "generated_by": "scripts/export-runtime-wire.ts",
   "schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -74,6 +74,9 @@
                 }
               }
             ]
+          },
+          "resume_conversation_id": {
+            "type": "string"
           },
           "model": {
             "type": "string"
@@ -163,6 +166,9 @@
           "runtime_overrides": {
             "type": "object",
             "properties": {
+              "detached_delivery": {
+                "type": "boolean"
+              },
               "model": {
                 "type": "string"
               },
@@ -579,6 +585,7 @@
               "run.admitted",
               "run.started",
               "run.created",
+              "run.warning",
               "message.delta",
               "message.completed",
               "tool.invoked",

@@ -78,6 +78,7 @@ class RuntimeOverrides(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    detached_delivery: bool | None = None
     model: str | None = None
     provider: str | None = None
     sampling_temperature: float | None = None
@@ -102,6 +103,7 @@ class RunRequest(BaseModel):
     session_id: str | None = None
     sessionId: str | None = None
     input: str | list[InputItem]
+    resume_conversation_id: str | None = None
     model: str | None = None
     budget: Budget | None = None
     tools: list[str | Tools] | None = None
@@ -212,6 +214,7 @@ class Type(Enum):
     run_admitted = 'run.admitted'
     run_started = 'run.started'
     run_created = 'run.created'
+    run_warning = 'run.warning'
     message_delta = 'message.delta'
     message_completed = 'message.completed'
     tool_invoked = 'tool.invoked'
