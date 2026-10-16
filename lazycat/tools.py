@@ -32,7 +32,7 @@ def strip_mcp_prefix(tool_name: str) -> str:
     return name
 
 class ToolExecutor:
-    """Standardized HTTP client for executing tools via lazy-tool-service."""
+    """Standardized HTTP client for executing tools via lazy-agent-service."""
 
     def __init__(self):
         self._client: httpx.AsyncClient | None = None
@@ -40,11 +40,11 @@ class ToolExecutor:
     @property
     def url(self) -> str:
         import os
-        env_url = os.getenv("LAZY_TOOL_SERVICE_URL")
+        env_url = os.getenv("LAZY_AGENT_SERVICE_URL")
         if env_url:
             return env_url
-        port = config.LAZY_TOOL_SERVICE_PORT
-        host = os.getenv("LAZY_TOOL_SERVICE_HOST", "127.0.0.1")
+        port = config.LAZY_AGENT_SERVICE_PORT
+        host = os.getenv("LAZY_AGENT_SERVICE_HOST", "127.0.0.1")
         return f"http://{host}:{port}"
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -58,7 +58,7 @@ class ToolExecutor:
         arguments: dict,
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Execute a tool by proxying to the lazy-tool-service.
+        """Execute a tool by proxying to the lazy-agent-service.
 
         headers: identity headers for the proxy (x-conversation-id, x-agent,
         x-ticker). Without x-conversation-id the proxy's session whitelist
@@ -72,7 +72,7 @@ class ToolExecutor:
 
         payload = {"arguments": arguments}
         request_headers = {k: v for k, v in (headers or {}).items() if v}
-        # lazy-tool-service /execute requires EXECUTE_API_KEY once set server-side
+        # lazy-agent-service /execute requires EXECUTE_API_KEY once set server-side
         # (W3 of the harness audit); a signed trading context is exempt. Harmless
         # while the server key is unset.
         execute_key = os.getenv("EXECUTE_API_KEY", "").strip()
@@ -88,7 +88,7 @@ class ToolExecutor:
                 if r.status_code == 200:
                     return r.json()
                 else:
-                    return {"error": f"lazy-tool-service returned status code {r.status_code}: {r.text}"}
+                    return {"error": f"lazy-agent-service returned status code {r.status_code}: {r.text}"}
             except httpx.RequestError as e:
                 if attempt == max_retries - 1:
                     return {"error": f"Tool service request failed: {str(e)}"}

@@ -650,10 +650,10 @@ class ToolRegistry:
             enforce_ticker: If True, block tool calls where the 'ticker' argument
                             doesn't match the context ticker. Used during debates
                             to prevent cross-ticker data contamination.
-            force_local: If True, ignore USE_LAZY_TOOL_SERVICE and run the local
+            force_local: If True, ignore USE_LAZY_AGENT_SERVICE and run the local
                          registration function. Used by HTTP execute endpoints that
-                         lazy-tool-service itself calls — without it the call would
-                         bounce back to lazy-tool-service in an infinite loop.
+                         lazy-agent-service itself calls — without it the call would
+                         bounce back to lazy-agent-service in an infinite loop.
         """
         tool_call_id = tool_call.get("id")
         function_info = tool_call.get("function", {})
@@ -939,16 +939,16 @@ class ToolRegistry:
             import os
             use_lazy = (
                 not force_local
-                and os.getenv("USE_LAZY_TOOL_SERVICE", "false").lower() == "true"
+                and os.getenv("USE_LAZY_AGENT_SERVICE", "false").lower() == "true"
             )
-            # Bypass lazy-tool-service for save_trading_chart to execute it directly inside trading-service
+            # Bypass lazy-agent-service for save_trading_chart to execute it directly inside trading-service
             if use_lazy and func_name != "save_trading_chart":
                 from lazycat.tools import tool_executor
                 resp_json = await tool_executor.execute_tool(func_name, kwargs)
                 if "error" in resp_json:
                     raise RuntimeError(resp_json["error"])
                 result = resp_json.get("content", "")
-                service_source = "lazy-tool-service"
+                service_source = "lazy-agent-service"
             else:
                 service_source = "trading-service"
                 func = self.tools[func_name]
@@ -978,7 +978,7 @@ class ToolRegistry:
         except Exception as e:
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             logger.exception("[ToolRegistry] Tool execution failed for %s", func_name)
-            service_source = "lazy-tool-service"
+            service_source = "lazy-agent-service"
             self._log_usage(func_name, agent_name, False, elapsed_ms, str(e))
             return {
                 "role": "tool",

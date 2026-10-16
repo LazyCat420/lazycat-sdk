@@ -2,7 +2,7 @@
 
 One place, reused by every repo, for "research this topic deeply and hand me back
 a structured brief." It drives the server-side DEEP_RESEARCH agent (registered in
-lazy-tool-service, see personas/clients/DeepResearchPersona.ts) over the gateway's
+lazy-agent-service, see personas/clients/DeepResearchPersona.ts) over the gateway's
 /agent endpoint: the agent decomposes the topic, fans out parallel sub-researchers,
 reads sources, and finishes by calling emit_structured_output. This helper supplies
 the task + output contract, drains the SSE stream, and returns the structured data.
@@ -43,11 +43,11 @@ from .sse import iter_sse_json
 
 logger = get_logger(__name__)
 
-# The gateway (lazy-tool-service, host :5591) is where the DEEP_RESEARCH persona
+# The gateway (lazy-agent-service, host :5591) is where the DEEP_RESEARCH persona
 # lives — NOT real prism (:7777), which has no such catalog registered.
 # Overridable for other hosts.
 DEFAULT_GATEWAY_URL = os.getenv(
-    "LAZY_AGENT_URL", os.getenv("LAZY_TOOL_SERVICE_URL", "http://10.0.0.16:5591")
+    "LAZY_AGENT_URL", os.getenv("LAZY_AGENT_SERVICE_URL", "http://10.0.0.16:5591")
 )
 
 # Mirrors DeepResearchPersona.availableTools. Sent as enabledTools so the tools are

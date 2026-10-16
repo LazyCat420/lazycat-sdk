@@ -16,8 +16,8 @@ class Config:
         return os.getenv("VAULT_SERVICE_URL", "http://10.0.0.16:5599")
 
     @property
-    def LAZY_TOOL_SERVICE_PORT(self):
-        return os.getenv("LAZY_TOOL_SERVICE_PORT", "5591")
+    def LAZY_AGENT_SERVICE_PORT(self):
+        return os.getenv("LAZY_AGENT_SERVICE_PORT", "5591")
 
     @property
     def PRISM_SERVICE_PORT(self):

@@ -748,7 +748,7 @@ class PrismClient:
                 # Every agent registered through this helper carries an
                 # explicit tool list, so don't let the gateway force-document
                 # its ~30 CORE_AGENTIC_TOOLS + orchestrator tools next to it
-                # (honored by lazy-tool-service since 2026-07-14; real prism
+                # (honored by lazy-agent-service since 2026-07-14; real prism
                 # ignores unknown fields). Callers that want the forced core
                 # set pass core_tools_locked=True.
                 "coreToolsLocked": core_tools_locked,

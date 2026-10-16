@@ -52,7 +52,7 @@ DEFAULT_VLLM_URL = os.getenv("GROUNDED_VLLM_URL", os.getenv("VLLM_URL", "http://
 # whole network). This module used to call the `ddgs` library, which scrapes
 # DuckDuckGo and, on a blocked IP, tries about nine engines per call; the free
 # search engines bot-block this network's one public IP.
-DEFAULT_SEARCH_SERVICE_URL = os.getenv("LAZY_TOOL_SERVICE_URL", "http://10.0.0.16:5591")
+DEFAULT_SEARCH_SERVICE_URL = os.getenv("LAZY_AGENT_SERVICE_URL", "http://10.0.0.16:5591")
 
 _STOP = {"the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of", "is",
          "are", "was", "by", "with", "from", "as", "how", "why", "what", "s"}
