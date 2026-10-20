@@ -333,7 +333,8 @@ class AgentHarness:
             content = ""
             tool_calls = []
             request_usage: dict = {}
-            
+            stream_done = False
+
             import json
             try:
                 async for data in iter_sse_json_lines(resp.aiter_lines(), done_sentinel="[DONE]"):
@@ -402,12 +403,21 @@ class AgentHarness:
                         if isinstance(usage, dict):
                             request_usage = usage
                     elif event_type == "done":
+                        stream_done = True
                         if data.get("model"):
                             self.last_model = data["model"]
                         if data.get("provider"):
                             self.last_provider = data["provider"]
                     elif event_type == "error":
-                        logger.error(f"Agent stream error: {data.get('message')}")
+                        # Terminal: a mid-stream `error` means the model died
+                        # after emitting partial text. Committing that partial
+                        # content as the assistant answer booked a failure as
+                        # a successful turn (2026-10-20 cut-stream audit:
+                        # 'probeprobeprobe...' returned as the answer), so
+                        # stop consuming and fail the turn instead.
+                        raise RuntimeError(
+                            f"Agent stream error: {data.get('message') or 'unknown error'}"
+                        )
                     elif "text" in data and not event_type:
                         content = data.get("text", content)
                         tool_calls = data.get("toolCalls", tool_calls)
@@ -426,6 +436,17 @@ class AgentHarness:
                     self.prompt_tokens += int(request_usage.get("inputTokens") or 0)
                     self.reasoning_tokens += int(request_usage.get("reasoningOutputTokens") or 0)
                 await resp.aclose()
+
+            # A stream that ends without a `done` event (and without the
+            # [DONE] sentinel) was cut mid-generation — e.g. gateway crash,
+            # vLLM kill. The partial `content` is not an answer; returning it
+            # as one is the exact defect the cut-stream boundary probe caught
+            # (answer 'probeprobeprobe...' booked as a successful turn).
+            if not stream_done:
+                raise RuntimeError(
+                    "Agent stream ended without a done event; "
+                    f"discarding {len(content)} chars of partial content"
+                )
 
             # 2. Add LLM response to history
             self.session.add_assistant_message(content, tool_calls)

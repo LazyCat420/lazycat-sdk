@@ -16,6 +16,7 @@ async def test_agent_harness_terminates_cleanly():
     
     async def mock_aiter_lines():
         yield "data: {\"type\": \"chunk\", \"content\": \"I am done.\"}"
+        yield "data: {\"type\": \"done\"}"
         yield "data: [DONE]"
     
     mock_resp.aiter_lines = mock_aiter_lines
@@ -106,6 +107,7 @@ async def test_agent_harness_tool_call():
     async def mock_aiter_lines1():
         yield "data: {\"type\": \"chunk\", \"content\": \"\"}"
         yield "data: {\"toolCalls\": [{\"id\": \"call_1\", \"name\": \"dummy_tool\", \"arguments\": \"{}\"}]}"
+        yield "data: {\"type\": \"done\"}"
         yield "data: [DONE]"
     mock_resp1.aiter_lines = mock_aiter_lines1
 
@@ -113,6 +115,7 @@ async def test_agent_harness_tool_call():
     mock_resp2.aclose = AsyncMock()
     async def mock_aiter_lines2():
         yield "data: {\"type\": \"chunk\", \"content\": \"Result processed.\"}"
+        yield "data: {\"type\": \"done\"}"
         yield "data: [DONE]"
     mock_resp2.aiter_lines = mock_aiter_lines2
     
@@ -129,3 +132,86 @@ async def test_agent_harness_tool_call():
         assert mock_exec.called
         assert mock_exec.call_args[0][0] == "dummy_tool"
 
+
+
+@pytest.mark.asyncio
+async def test_error_event_is_terminal_and_discards_partial_content():
+    """A mid-stream `error` event must fail the turn: the partially
+    accumulated content is not an answer (2026-10-20 cut-stream audit:
+    'probeprobeprobe...' was committed and returned as a successful reply).
+    """
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="You are a test agent")
+    session = ConversationSession(session_id="test_error")
+    harness = AgentHarness(agent=agent, session=session)
+
+    mock_resp = MagicMock()
+    mock_resp.aclose = AsyncMock()
+
+    async def mock_aiter_lines():
+        yield "data: {\"type\": \"chunk\", \"content\": \"probeprobe\"}"
+        yield "data: {\"type\": \"error\", \"message\": \"upstream vLLM died\"}"
+        yield "data: {\"type\": \"chunk\", \"content\": \"more partial text\"}"
+        yield "data: [DONE]"
+
+    mock_resp.aiter_lines = mock_aiter_lines
+
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = mock_resp
+        with pytest.raises(RuntimeError, match="upstream vLLM died"):
+            await harness.run("Hello")
+
+    # The partial content must not be booked as the assistant's answer.
+    messages = session.get_messages()
+    assert [m["role"] for m in messages] == ["user"]
+    assert not any(m["role"] == "assistant" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_stream_ending_without_done_event_is_not_returned_as_answer():
+    """A stream cut mid-generation (no `done` event) must not come back as a
+    normal answer; the partial content is discarded and the turn fails."""
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="You are a test agent")
+    session = ConversationSession(session_id="test_cut")
+    harness = AgentHarness(agent=agent, session=session)
+
+    mock_resp = MagicMock()
+    mock_resp.aclose = AsyncMock()
+
+    async def mock_aiter_lines():
+        yield "data: {\"type\": \"chunk\", \"content\": \"probeprobeprobe\"}"
+        # connection dies here: no done event, no [DONE] sentinel
+
+    mock_resp.aiter_lines = mock_aiter_lines
+
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = mock_resp
+        with pytest.raises(RuntimeError, match="without a done event"):
+            await harness.run("Hello")
+
+    messages = session.get_messages()
+    assert [m["role"] for m in messages] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_normal_stream_with_done_event_still_returns_text():
+    agent = BaseAgent(model="test-model", name="test_agent", system_prompt="You are a test agent")
+    session = ConversationSession(session_id="test_normal")
+    harness = AgentHarness(agent=agent, session=session)
+
+    mock_resp = MagicMock()
+    mock_resp.aclose = AsyncMock()
+
+    async def mock_aiter_lines():
+        yield "data: {\"type\": \"chunk\", \"content\": \"OK\"}"
+        yield "data: {\"type\": \"done\"}"
+        yield "data: [DONE]"
+
+    mock_resp.aiter_lines = mock_aiter_lines
+
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = mock_resp
+        result = await harness.run("Hello")
+
+    assert result == "OK"
+    messages = session.get_messages()
+    assert messages[-1] == {"role": "assistant", "content": "OK"}

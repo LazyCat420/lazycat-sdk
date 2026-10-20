@@ -60,6 +60,7 @@ async def test_agent_harness_passes_inline_system_prompt_false():
     mock_resp.aclose = AsyncMock()
     async def mock_aiter_lines():
         yield "data: {\"type\": \"chunk\", \"content\": \"done\"}"
+        yield "data: {\"type\": \"done\"}"
         yield "data: [DONE]"
     mock_resp.aiter_lines = mock_aiter_lines
     
