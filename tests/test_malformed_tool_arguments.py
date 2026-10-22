@@ -113,6 +113,7 @@ async def test_a_malformed_call_never_reaches_the_executor():
             'data: {"toolCalls": [{"id": "c1", "name": "emit_structured_output",'
             f' "arguments": "{truncated}"}}]}}'
         )
+        yield 'data: {"type": "done"}'
         yield "data: [DONE]"
     first.aiter_lines = _first
 
@@ -121,6 +122,7 @@ async def test_a_malformed_call_never_reaches_the_executor():
 
     async def _second():
         yield 'data: {"type": "chunk", "content": "Recovered."}'
+        yield 'data: {"type": "done"}'
         yield "data: [DONE]"
     second.aiter_lines = _second
 

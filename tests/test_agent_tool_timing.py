@@ -32,9 +32,15 @@ def _harness(on_tool_result):
 
 
 def _sse(events):
-    """Build the SSE line stream AgentHarness.run consumes."""
+    """Build the SSE line stream AgentHarness.run consumes.
+
+    A normal completion ends with prism's `done` event; the [DONE] sentinel
+    alone does not count (a stream without `done` is a cut stream and run()
+    raises, fb6edc0).
+    """
     import json as _json
     lines = [f"data: {_json.dumps(e)}" for e in events]
+    lines.append('data: {"type": "done"}')
     lines.append("data: [DONE]")
     return lines
 

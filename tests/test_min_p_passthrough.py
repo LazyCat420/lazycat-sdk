@@ -31,15 +31,17 @@ def _harness(**agent_kwargs):
 
 
 class _EmptyStream:
-    """Minimal stand-in for LLMStreamWrapper: yields no SSE lines.
+    """Minimal stand-in for LLMStreamWrapper: an empty but COMPLETED stream.
 
-    This is also exactly the shape prism returns on the failure being fixed —
-    HTTP 200, zero events — so the fixture doubles as the bug's signature.
+    Zero chunks followed by prism's terminal `done` event — the shape of the
+    failure being fixed (HTTP 200, no content) as a normal completion. The
+    `done` event is required: since fb6edc0 a stream that ends without one is
+    a cut stream and AgentHarness.run raises instead of returning "".
     """
 
     async def aiter_lines(self):
-        return
-        yield  # pragma: no cover — makes this an async generator
+        yield 'data: {"type": "done"}'
+        yield "data: [DONE]"
 
     async def aclose(self):
         return None

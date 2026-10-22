@@ -105,6 +105,7 @@ async def test_harness_sends_max_iterations_over_the_wire():
 
     async def mock_aiter_lines():
         yield 'data: {"type": "chunk", "content": "done"}'
+        yield 'data: {"type": "done"}'
         yield "data: [DONE]"
 
     mock_resp.aiter_lines = mock_aiter_lines
