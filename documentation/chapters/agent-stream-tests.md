@@ -1,3 +1,9 @@
+---
+part: Reference
+status: reference
+updated: 2026-10-23
+---
+
 # Agent stream test fakes
 
 `AgentHarness.run` (`lazycat/agent.py`) consumes prism's SSE stream. A normal

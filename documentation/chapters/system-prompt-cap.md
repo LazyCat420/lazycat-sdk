@@ -1,4 +1,12 @@
+---
+part: Features
+status: shipped
+updated: 2026-10-23
+---
+
 # The `systemPrompt` cap: cut loudly, never silently
+
+Shipped in `118d065` (on `main`): the cap and override in `lazycat/llm.py`, tested by `tests/test_system_prompt_cap.py`.
 
 **Status 2026-10-23.**
 - `AgentClient.call_agent` and `AgentClient.get_stream_payload_and_url` still cap the `systemPrompt` field at 15,000 characters by default.
