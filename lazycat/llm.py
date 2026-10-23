@@ -1,6 +1,7 @@
 import asyncio
 import contextvars
 import logging
+import os
 import uuid
 from typing import Any
 
@@ -12,6 +13,57 @@ from lazycat.sse import iter_sse_lines
 import json
 
 logger = logging.getLogger(__name__)
+
+#: The only limit on the `systemPrompt` field: lazy-agent-service accepts any
+#: length (`systemPrompt: z.string()`). It has been here since the SDK's first
+#: commit and cut SILENTLY until 2026-10-22, when the trading Board's
+#: 19,598-char system prompt was found losing its last 4,598 characters (every
+#: output example) on every call while 12 of 13 first answers failed the
+#: schema (trading-client ch.47, plan item 1.1). It still cuts, but says so.
+#: Override per process with LAZYCAT_SYSTEM_PROMPT_MAX_CHARS; <= 0 disables it.
+SYSTEM_PROMPT_MAX_CHARS = int(os.environ.get("LAZYCAT_SYSTEM_PROMPT_MAX_CHARS", "15000"))
+
+#: Agent names already warned about: a long prompt warns once per process,
+#: not once per call.
+_WARNED_SYSTEM_PROMPT_CUTS: set[str] = set()
+
+
+def _cap_system_prompt(system_prompt: str | None, agent_name: str | None) -> str:
+    """The payload's `systemPrompt`, cut to SYSTEM_PROMPT_MAX_CHARS, never silently.
+
+    A cut logs a WARNING once per agent name per process, and adds an
+    OpenTelemetry event to the caller's current span on every call when the
+    caller runs OpenTelemetry (the SDK itself does not depend on it).
+    """
+    text = system_prompt or ""
+    cap = SYSTEM_PROMPT_MAX_CHARS
+    if cap <= 0 or len(text) <= cap:
+        return text
+    name = agent_name or "<unnamed>"
+    dropped = len(text) - cap
+    if name not in _WARNED_SYSTEM_PROMPT_CUTS:
+        _WARNED_SYSTEM_PROMPT_CUTS.add(name)
+        logger.warning(
+            "[AgentClient] systemPrompt for agent %r is %d chars; the %d-char cap "
+            "(LAZYCAT_SYSTEM_PROMPT_MAX_CHARS) drops its last %d chars, which the "
+            "model never sees. Shorten it or move rules into the user message. "
+            "(Logged once per agent per process; every cut is a span event.)",
+            name, len(text), cap, dropped,
+        )
+    try:
+        from opentelemetry import trace as _otel_trace
+
+        span = _otel_trace.get_current_span()
+        if span.is_recording():
+            span.add_event("lazycat.system_prompt_truncated", {
+                "lazycat.agent": name,
+                "lazycat.system_prompt.chars": len(text),
+                "lazycat.system_prompt.cap": cap,
+                "lazycat.system_prompt.dropped_chars": dropped,
+            })
+    except Exception:  # noqa: BLE001 — tracing is best-effort; never block the call
+        pass
+    return text[:cap]
 
 bench_harness_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("bench_harness", default=None)
 bench_run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("bench_run_id", default=None)
@@ -460,7 +512,7 @@ class AgentClient:
             "project": project,
             "username": username,
             "agent": agent_name,
-            "systemPrompt": system_prompt[:15000],
+            "systemPrompt": _cap_system_prompt(system_prompt, agent_name),
             "functionCallingEnabled": False,
             "autoApprove": auto_approve,
         }
@@ -701,7 +753,7 @@ class AgentClient:
             "agent": agent_name,
             "functionCallingEnabled": agentic_mode,
             "agenticLoopEnabled": agentic_mode,
-            "systemPrompt": system_prompt[:15000],
+            "systemPrompt": _cap_system_prompt(system_prompt, agent_name),
         }
         # `thinkingEnabled` used to ship only when the caller also set
         # is_qwen_model, which trading-client never did — so an explicit
