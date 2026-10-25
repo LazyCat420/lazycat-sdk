@@ -5,9 +5,8 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Any, Dict, Literal
-from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, confloat, conint, constr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, conint, constr
 
 
 class Role(Enum):
@@ -112,102 +111,6 @@ class RunRequest(BaseModel):
     idempotencyKey: str | None = None
     deadline_ms: conint(ge=0, le=9007199254740991) | None = None
     runtime_overrides: RuntimeOverrides | None = None
-
-
-class QuestionId(Enum):
-    agent_next_readonly_action_v1 = 'agent.next_readonly_action.v1'
-    agent_evidence_sufficiency_v1 = 'agent.evidence_sufficiency.v1'
-
-
-class Questions(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    type: Literal['choice']
-    instructions: constr(min_length=1, max_length=2048)
-    criteria: dict[constr(min_length=1, max_length=128), constr(max_length=512)]
-    requiredAbstainOption: Literal[True]
-
-
-class Constraints(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    maxLatencyMs: conint(ge=1, le=2000)
-    shadowOnly: Literal[True]
-    noSideEffects: Literal[True]
-    maxAttempts: Literal[1]
-
-
-class DecisionRequest(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    requestId: UUID
-    runId: constr(min_length=1)
-    capability: Literal['semantic.choice.v1']
-    questionId: QuestionId
-    policyVersion: Literal['shadow.v1']
-    dataClassification: Literal['public']
-    state: constr(max_length=32768)
-    questions: dict[constr(min_length=1, max_length=128), Questions]
-    constraints: Constraints
-
-
-class DeploymentState(Enum):
-    candidate_shadow = 'candidate_shadow'
-    advisory_shadow = 'advisory_shadow'
-
-
-class Provider(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    id: Literal['tinymodels']
-    version: constr(min_length=1)
-    modelId: constr(min_length=1)
-    artifactId: str | None = None
-    deploymentId: constr(min_length=1)
-    deploymentState: DeploymentState
-
-
-class CalibrationState(Enum):
-    uncalibrated = 'uncalibrated'
-    calibrated = 'calibrated'
-    not_available = 'not_available'
-
-
-class Results(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    type: Literal['choice']
-    value: str
-    probabilities: dict[str, confloat(ge=0.0, le=1.0)] | None = None
-    rawConfidence: confloat(ge=0.0, le=1.0) | None = None
-    calibratedConfidence: confloat(ge=0.0, le=1.0) | None = None
-    calibrationState: CalibrationState
-    abstained: bool
-
-
-class Evidence(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    inputHash: constr(pattern=r'^sha256-[a-f0-9]{64}$')
-    outputHash: constr(pattern=r'^sha256-[a-f0-9]{64}$')
-    processUnloaded: bool
-    latencyMs: confloat(ge=0.0)
-
-
-class DecisionResult(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    requestId: UUID
-    provider: Provider
-    results: dict[str, Results]
-    evidence: Evidence
 
 
 class Type(Enum):
@@ -322,8 +225,6 @@ class Model(BaseModel):
     )
     contract_version: Literal['runtime-wire.v1.0.0']
     run_request: RunRequest
-    decision_request: DecisionRequest
-    decision_result: DecisionResult
     run_event: RunEvent
     run_result: RunResult
     tool_result_command: ToolResultCommand
