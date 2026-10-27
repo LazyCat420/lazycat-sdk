@@ -19,6 +19,7 @@ from lazycat.tools import strip_mcp_prefix
     [
         "mcp__lazy-agent-service__get_stock_price",
         "mcp__lazy-tool-service__get_stock_price",
+        "mcp__lazy-tools__get_stock_price",
     ],
 )
 def test_both_service_names_strip_to_the_same_bare_name(namespaced):

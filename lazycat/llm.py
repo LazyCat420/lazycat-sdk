@@ -63,7 +63,13 @@ def _cap_system_prompt(system_prompt: str | None, agent_name: str | None) -> str
             })
     except Exception:  # noqa: BLE001 — tracing is best-effort; never block the call
         pass
+    out_idx = text.rfind("\n## OUTPUT")
+    if out_idx > 0 and len(text) - out_idx < cap // 2:
+        tail = text[out_idx:]
+        head_budget = cap - len(tail)
+        return text[:head_budget] + tail
     return text[:cap]
+
 
 bench_harness_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("bench_harness", default=None)
 bench_run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("bench_run_id", default=None)

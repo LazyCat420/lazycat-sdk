@@ -112,3 +112,13 @@ def test_every_cut_is_an_event_on_the_callers_span(monkeypatch):
     assert len(events) == 2
     assert events[0].attributes["lazycat.agent"] == "board"
     assert events[0].attributes["lazycat.system_prompt.dropped_chars"] == 4
+
+
+def test_cap_system_prompt_preserves_trailing_output_section(monkeypatch):
+    monkeypatch.setattr(llm, "SYSTEM_PROMPT_MAX_CHARS", 200)
+    tail = "\n## OUTPUT\nRespond with ONLY JSON: {\"action\": \"BUY\"}"
+    prompt = "A" * 250 + tail
+    capped = llm._cap_system_prompt(prompt, "board")
+    assert len(capped) <= 200
+    assert capped.endswith(tail)
+

@@ -20,12 +20,13 @@ logger = logging.getLogger(__name__)
 _MCP_PREFIXES = (
     "mcp__lazy-agent-service__",
     "mcp__lazy-tool-service__",
+    "mcp__lazy-tools__",
 )
 
 
-def strip_mcp_prefix(tool_name: str) -> str:
+def strip_mcp_prefix(tool_name: str | None) -> str:
     """Namespaced tool name -> bare name. Bare names pass through unchanged."""
-    name = tool_name or ""
+    name = (tool_name or "").strip()
     for prefix in _MCP_PREFIXES:
         if name.startswith(prefix):
             return name[len(prefix):]
