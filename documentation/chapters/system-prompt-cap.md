@@ -1,15 +1,16 @@
 ---
 part: Features
 status: shipped
-updated: 2026-10-23
+updated: 2026-10-27
 ---
 
 # The `systemPrompt` cap: cut loudly, never silently
 
-Shipped in `118d065` (on `main`): the cap and override in `lazycat/llm.py`, tested by `tests/test_system_prompt_cap.py`.
+Shipped in `118d065` and updated in `dd500df` (on `main`): the cap, trailing `\n## OUTPUT` preservation, and override in `lazycat/llm.py`, tested by `tests/test_system_prompt_cap.py`, plus unified `MCP_PREFIXES` (`mcp__lazy-agent-service__`, `mcp__lazy-tool-service__`, `mcp__lazy-tools__`) in `lazycat/tools.py` tested by `tests/test_mcp_prefix.py`.
 
-**Status 2026-10-23.**
-- `AgentClient.call_agent` and `AgentClient.get_stream_payload_and_url` still cap the `systemPrompt` field at 15,000 characters by default.
+**Status 2026-10-27.**
+- `AgentClient.call_agent` and `AgentClient.get_stream_payload_and_url` cap the `systemPrompt` field at 15,000 characters by default, and when the prompt contains a trailing `\n## OUTPUT` contract section (`H-7`), `_cap_system_prompt` preserves the entire trailing `\n## OUTPUT` section while truncating the middle body so the agent never loses its output schema.
+- `lazycat.tools.MCP_PREFIXES` and `strip_mcp_prefix` provide a single canonical definition of MCP tool prefixes across SDK and service consumers.
 - A cut is no longer silent:
   - The SDK logs a WARNING once per agent name per process, with the prompt's length, the cap and the number of characters dropped.
   - Every cut adds a `lazycat.system_prompt_truncated` event to the caller's current OpenTelemetry span, when the caller runs OpenTelemetry. The SDK does not depend on it.
