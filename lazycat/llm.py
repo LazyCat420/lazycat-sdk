@@ -414,6 +414,70 @@ class AgentClient:
         suffix = f"-{session_id[-8:]}" if session_id else ""
         return self._conversations.get(f"chat-{agent_name}{suffix}")
 
+    @staticmethod
+    def _derive_session_suffix(session_id: str | None, messages: list[dict]) -> str:
+        if session_id:
+            return f"-{session_id[-8:]}"
+        if not messages:
+            return ""
+        # Find the first user message that is not a dummy acknowledgement to create a sticky session key unique to this conversation thread
+        first_user_msg = next(
+            (
+                m
+                for m in messages
+                if m.get("role") == "user"
+                and m.get("content") != "Acknowledged. I am ready to process the quantitative data."
+            ),
+            None,
+        )
+        if not first_user_msg:
+            first_user_msg = next((m for m in messages if m.get("role") == "user"), None)
+        if first_user_msg and isinstance(first_user_msg.get("content"), str):
+            import hashlib
+
+            content_hash = hashlib.md5(first_user_msg["content"].encode("utf-8")).hexdigest()[:8]
+            return f"-{content_hash}"
+        return ""
+
+    @staticmethod
+    def _extract_enabled_tool_names(tools: list[dict]) -> list[str]:
+        enabled_tools = []
+        for t in tools:
+            if "function" in t:
+                enabled_tools.append(t["function"]["name"])
+            elif "name" in t:
+                enabled_tools.append(t["name"])
+        return enabled_tools
+
+    @staticmethod
+    def _apply_optional_agent_payload_fields(
+        payload: dict,
+        *,
+        effective_run_id: str | None,
+        max_iterations: int | None,
+        thinking_enabled: bool | None,
+        min_p: float | None,
+        workspace_enabled: bool | None,
+        disabled_tools: list[str] | None,
+        tools: list[dict] | None,
+    ) -> None:
+        if effective_run_id:
+            payload["user"] = effective_run_id
+        if max_iterations is not None:
+            payload["maxIterations"] = max_iterations
+        if thinking_enabled is not None:
+            payload["thinkingEnabled"] = thinking_enabled
+        if min_p is not None:
+            payload["minP"] = min_p
+        if workspace_enabled is not None:
+            payload["workspaceEnabled"] = workspace_enabled
+        if disabled_tools:
+            # Mode 2 in prism's AgenticToolResolver: the denylist is read only
+            # when `enabledTools` is absent, so these are mutually exclusive.
+            payload["disabledTools"] = disabled_tools
+        elif tools:
+            payload["enabledTools"] = AgentClient._extract_enabled_tool_names(tools)
+
     async def call_agent(
         self,
         model: str,
@@ -475,22 +539,7 @@ class AgentClient:
             
         client = await self._get_client()
         
-        session_suffix = ""
-        if session_id:
-            session_suffix = f"-{session_id[-8:]}"
-        elif messages:
-            # Find the first user message that is not a dummy acknowledgement to create a sticky session key unique to this conversation thread
-            first_user_msg = next(
-                (m for m in messages if m.get("role") == "user" and m.get("content") != "Acknowledged. I am ready to process the quantitative data."),
-                None
-            )
-            if not first_user_msg:
-                first_user_msg = next((m for m in messages if m.get("role") == "user"), None)
-            if first_user_msg and isinstance(first_user_msg.get("content"), str):
-                import hashlib
-                content_hash = hashlib.md5(first_user_msg["content"].encode("utf-8")).hexdigest()[:8]
-                session_suffix = f"-{content_hash}"
-                
+        session_suffix = self._derive_session_suffix(session_id, messages)
         group_key = f"chat-{agent_name}{session_suffix}"
         session_id, is_new = self._get_or_create_session(group_key)
         
@@ -522,30 +571,16 @@ class AgentClient:
             "functionCallingEnabled": False,
             "autoApprove": auto_approve,
         }
-        if effective_run_id:
-            payload["user"] = effective_run_id
-
-        if max_iterations is not None:
-            payload["maxIterations"] = max_iterations
-        if thinking_enabled is not None:
-            payload["thinkingEnabled"] = thinking_enabled
-        if min_p is not None:
-            payload["minP"] = min_p
-        if workspace_enabled is not None:
-            payload["workspaceEnabled"] = workspace_enabled
-
-        if disabled_tools:
-            # Mode 2 in prism's AgenticToolResolver: the denylist is read only
-            # when `enabledTools` is absent, so these are mutually exclusive.
-            payload["disabledTools"] = disabled_tools
-        elif tools:
-            enabled_tools = []
-            for t in tools:
-                if "function" in t:
-                    enabled_tools.append(t["function"]["name"])
-                elif "name" in t:
-                    enabled_tools.append(t["name"])
-            payload["enabledTools"] = enabled_tools
+        self._apply_optional_agent_payload_fields(
+            payload,
+            effective_run_id=effective_run_id,
+            max_iterations=max_iterations,
+            thinking_enabled=thinking_enabled,
+            min_p=min_p,
+            workspace_enabled=workspace_enabled,
+            disabled_tools=disabled_tools,
+            tools=tools,
+        )
 
         # Always force a new session to prevent it from accumulating
         # duplicate history (since lazycat-sdk manages the conversation history locally).

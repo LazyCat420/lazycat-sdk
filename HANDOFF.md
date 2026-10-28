@@ -1,4 +1,16 @@
-# HANDOFF — lazycat-sdk v0.3.0 (2026-07-20)
+# HANDOFF — lazycat-sdk v0.4.1 (2026-10-28)
+
+## Latest Update (2026-10-28 — Phase 8 `/lego` CRAP Decomposition, v0.4.1)
+
+- Decomposed all 3 functions in `lazycat/` that exceeded McCabe cyclomatic complexity 30 into single-responsibility helpers (`<= 15` complexity each), reducing max complexity across `lazycat-sdk` from `60` to `26` (`0` functions `> 30`):
+  - `lazycat/agent.py`: `AgentHarness.run` (`60 -> 14`)
+  - `lazycat/tool_registry.py`: `ToolRegistry.execute_tool_call` (`43 -> 11`)
+  - `lazycat/llm.py`: `AgentClient.call_agent` (`32 -> 14`)
+- Verified with full `pytest` suite (`209 passed`).
+
+---
+
+# Historical Handoff — lazycat-sdk v0.3.0 (2026-07-20)
 
 ## What shipped
 

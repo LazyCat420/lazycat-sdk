@@ -37,7 +37,7 @@ from .client import (
 # importing the package stays cheap and the top-level surface stays readable.
 
 # Keep in sync with pyproject.toml [project] version
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 __all__ = [
     "agent_client",
