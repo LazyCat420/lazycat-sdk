@@ -15,7 +15,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable
 
 from pydantic import BaseModel, ValidationError
 
@@ -652,6 +652,282 @@ class ToolRegistry:
 
         return True, f"permission={meta.permission.value}"
 
+    @staticmethod
+    def _clean_tool_identifier(s: str) -> str:
+        return s.lower().replace(" ", "").replace("_", "").replace("-", "")
+
+    def _normalize_tool_name(self, func_name: str | None, function_info: dict) -> str | None:
+        if not func_name:
+            return func_name
+        # Strip trailing tags like </Function
+        if "</" in func_name:
+            func_name = func_name.split("</")[0].strip()
+
+        target_cleaned = self._clean_tool_identifier(func_name)
+        matched_name = None
+        for registered_name in self.tools:
+            reg_cleaned = self._clean_tool_identifier(registered_name)
+            if reg_cleaned == target_cleaned:
+                matched_name = registered_name
+                break
+            if (
+                self._clean_tool_identifier("get_" + registered_name) == target_cleaned
+                or reg_cleaned == self._clean_tool_identifier("get_" + target_cleaned)
+            ):
+                matched_name = registered_name
+                break
+
+        if matched_name:
+            if matched_name != func_name:
+                logger.info(
+                    "[ToolRegistry] Normalized tool call name: '%s' -> '%s'",
+                    func_name,
+                    matched_name,
+                )
+            func_name = matched_name
+            function_info["name"] = func_name
+        return func_name
+
+    def _build_missing_args_response(
+        self,
+        func_name: str | None,
+        tool_call_id: Any,
+        agent_name: str,
+        ticker: str,
+        cycle_id: str,
+        missing: list[str],
+        dropped_keys: list[str],
+        props: Any,
+        required: Any,
+    ) -> dict:
+        self._log_usage(
+            func_name or "unknown",
+            agent_name,
+            ticker,
+            cycle_id,
+            False,
+            0,
+            f"Malformed arguments: missing {missing}",
+        )
+        if dropped_keys:
+            cause = (
+                f", and {len(dropped_keys)} argument(s) were not part of "
+                f"this tool's schema. This usually means the JSON was not "
+                f"escaped correctly — check that quotes inside string values "
+                f"are escaped and that arrays are closed"
+            )
+        else:
+            cause = " and must be supplied"
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": func_name,
+            "content": json.dumps(
+                {
+                    "error": (
+                        f"Malformed tool arguments. Required field(s) "
+                        f"{missing} were missing{cause}."
+                    ),
+                    "expected_arguments": sorted(props),
+                    "required_arguments": sorted(required),
+                    "hint": "Re-issue the call with valid JSON matching the schema above.",
+                }
+            ),
+        }
+
+    def _parse_and_normalize_arguments(
+        self,
+        func_name: str | None,
+        arguments_json: str,
+        function_info: dict,
+        tool_call_id: Any,
+        agent_name: str,
+        ticker: str,
+        cycle_id: str,
+    ) -> tuple[dict | None, str, str | None, dict | None]:
+        try:
+            # Clean up trailing tags from arguments string if present
+            if arguments_json and "</" in arguments_json:
+                arguments_json = arguments_json.split("</")[0].strip()
+
+            kwargs = json.loads(arguments_json)
+
+            # Convert all argument keys to lowercase (e.g. {"Ticker": "IP"} -> {"ticker": "IP"})
+            kwargs = {k.lower(): v for k, v in kwargs.items()}
+
+            # Drop anything the tool never declared, so a malformed key cannot
+            # reach func(**kwargs) and raise TypeError.
+            kwargs, _dropped_keys = self._filter_kwargs_to_schema(func_name, kwargs)
+            if _dropped_keys:
+                logger.warning(
+                    "[ToolRegistry] %s: dropped %d undeclared argument(s): %s",
+                    func_name,
+                    len(_dropped_keys),
+                    [k[:60] for k in _dropped_keys],
+                )
+
+            _props, _required = self._schema_params(func_name)
+            _unbindable = self._unbindable_params(func_name, kwargs)
+            _missing = _unbindable or (
+                sorted(_required - set(kwargs)) if _dropped_keys else []
+            )
+            if _missing:
+                err_resp = self._build_missing_args_response(
+                    func_name,
+                    tool_call_id,
+                    agent_name,
+                    ticker,
+                    cycle_id,
+                    _missing,
+                    _dropped_keys,
+                    _props,
+                    _required,
+                )
+                return None, arguments_json, None, err_resp
+
+            # Update the parsed arguments representation
+            arguments_json = json.dumps(kwargs)
+            function_info["arguments"] = arguments_json
+
+            normalized_args = json.dumps(kwargs, sort_keys=True, separators=(",", ":"))
+            cache_key = f"{func_name}:{normalized_args}"
+            return kwargs, arguments_json, cache_key, None
+        except Exception as e:
+            logger.error(
+                "[ToolRegistry] Failed to parse JSON arguments for %s: %s | raw: %s",
+                func_name,
+                e,
+                arguments_json[:200],
+            )
+            self._log_usage(
+                func_name or "unknown",
+                agent_name,
+                ticker,
+                cycle_id,
+                False,
+                0,
+                f"JSON parse error: {e}",
+            )
+            return (
+                None,
+                arguments_json,
+                None,
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": func_name,
+                    "content": json.dumps(
+                        {
+                            "error": f"Invalid JSON arguments: {e}",
+                            "hint": "Please provide valid JSON arguments.",
+                        }
+                    ),
+                },
+            )
+
+    def _check_ticker_guardrail(
+        self,
+        func_name: str | None,
+        kwargs: dict,
+        ticker: str,
+        agent_name: str,
+        tool_call_id: Any,
+    ) -> dict | None:
+        if not (ticker and "ticker" in kwargs):
+            return None
+        tool_ticker = str(kwargs["ticker"]).upper().strip()
+        context_ticker = str(ticker).upper().strip()
+        if tool_ticker and tool_ticker != context_ticker:
+            logger.warning(
+                "[ToolRegistry] CROSS-CONTAMINATION BLOCKED: %s requested ticker %s but context is %s",
+                func_name,
+                tool_ticker,
+                context_ticker,
+            )
+            self._log_usage(
+                func_name,
+                agent_name,
+                False,
+                0,
+                f"Cross-contamination blocked: {tool_ticker} != {context_ticker}",
+            )
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": func_name,
+                "content": json.dumps(
+                    {
+                        "error": f"Unauthorized ticker access. You are analyzing {context_ticker}, but you requested {tool_ticker}.",
+                        "hint": f"Only query data for the assigned ticker ({context_ticker}). For peer/competitor comparisons, use screener_query with industry filters.",
+                    }
+                ),
+            }
+        return None
+
+    def _check_tool_cache_hit(
+        self,
+        tool_cache: dict | None,
+        cache_key: str,
+        func_name: str,
+        agent_name: str,
+        tool_call_id: Any,
+    ) -> dict | None:
+        if not tool_cache:
+            return None
+        cached_content = None
+        hit_key = None
+        if cache_key in tool_cache:
+            cached_content = tool_cache[cache_key]
+            hit_key = cache_key
+        elif func_name in tool_cache:
+            cached_content = tool_cache[func_name]
+            hit_key = func_name
+
+        if cached_content is None:
+            return None
+        logger.info(
+            "[ToolRegistry] Intercepted %s via tool_cache (%s) to prevent redundant execution.",
+            func_name,
+            hit_key,
+        )
+        # Log cache hit usage (0ms execution)
+        self._log_usage(func_name, agent_name, True, 0, "Cache Hit")
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": func_name,
+            "content": cached_content,
+        }
+
+    async def _invoke_registered_or_remote_tool(
+        self, func_name: str, kwargs: dict, force_local: bool
+    ) -> tuple[Any, str]:
+        import os
+
+        use_lazy = (
+            not force_local
+            and os.getenv("USE_LAZY_AGENT_SERVICE", "false").lower() == "true"
+        )
+        # Bypass lazy-agent-service for save_trading_chart to execute it directly inside trading-service
+        if use_lazy and func_name != "save_trading_chart":
+            from lazycat.tools import tool_executor
+
+            resp_json = await tool_executor.execute_tool(func_name, kwargs)
+            if "error" in resp_json:
+                raise RuntimeError(resp_json["error"])
+            return resp_json.get("content", ""), "lazy-agent-service"
+
+        func = self.tools[func_name]
+        if func is None:
+            raise RuntimeError(
+                f"Tool '{func_name}' has no local registration function in this service context."
+            )
+        if inspect.iscoroutinefunction(func):
+            result = await func(**kwargs)
+        else:
+            result = func(**kwargs)
+        return result, "trading-service"
+
     async def execute_tool_call(
         self,
         tool_call: dict,
@@ -683,171 +959,27 @@ class ToolRegistry:
         """
         tool_call_id = tool_call.get("id")
         function_info = tool_call.get("function", {})
-        func_name = function_info.get("name")
+        func_name = self._normalize_tool_name(function_info.get("name"), function_info)
         arguments_json = function_info.get("arguments", "{}")
 
-        # ── Robust Normalization of Tool Name & Arguments ──
-        if func_name:
-            # Strip trailing tags like </Function
-            if "</" in func_name:
-                func_name = func_name.split("</")[0].strip()
-            
-            # Map capitalized names with spaces/hyphens to registered lowercase snake_case names
-            def clean_str(s: str) -> str:
-                return s.lower().replace(" ", "").replace("_", "").replace("-", "")
-            
-            target_cleaned = clean_str(func_name)
-            matched_name = None
-            for registered_name in self.tools:
-                reg_cleaned = clean_str(registered_name)
-                # Check for exact normalized match
-                if reg_cleaned == target_cleaned:
-                    matched_name = registered_name
-                    break
-                # Check with get_ prefix variation (e.g. "Technical Indicators" -> "get_technical_indicators")
-                if clean_str("get_" + registered_name) == target_cleaned or reg_cleaned == clean_str("get_" + target_cleaned):
-                    matched_name = registered_name
-                    break
-
-            if matched_name:
-                if matched_name != func_name:
-                    logger.info("[ToolRegistry] Normalized tool call name: '%s' -> '%s'", func_name, matched_name)
-                func_name = matched_name
-                # Update function info representation
-                function_info["name"] = func_name
-
-        # ── Parse and Normalize JSON arguments ──
-        try:
-            # Clean up trailing tags from arguments string if present
-            if arguments_json and "</" in arguments_json:
-                arguments_json = arguments_json.split("</")[0].strip()
-                
-            kwargs = json.loads(arguments_json)
-            
-            # Convert all argument keys to lowercase (e.g. {"Ticker": "IP"} -> {"ticker": "IP"})
-            kwargs = {k.lower(): v for k, v in kwargs.items()}
-
-            # Drop anything the tool never declared, so a malformed key cannot
-            # reach func(**kwargs) and raise TypeError.
-            kwargs, _dropped_keys = self._filter_kwargs_to_schema(func_name, kwargs)
-            if _dropped_keys:
-                logger.warning(
-                    "[ToolRegistry] %s: dropped %d undeclared argument(s): %s",
-                    func_name,
-                    len(_dropped_keys),
-                    [k[:60] for k in _dropped_keys],
-                )
-
-            # Required-field check, for EVERY call — not just the ones that also
-            # carried junk. This block used to be nested under `if _dropped_keys`,
-            # so it only ever fired when the model sent an undeclared key as well.
-            # A plain omission skipped the check entirely and died inside
-            # `func(**kwargs)` as a raw `TypeError: ... missing 1 required
-            # positional argument`, which the model cannot act on and simply
-            # retries verbatim.
-            #
-            # Two triggers, deliberately different. `_unbindable_params` is the
-            # strict one: the call physically cannot execute, so intercepting it
-            # costs nothing and replaces a guaranteed TypeError. The schema's
-            # `required` list is used only where it already was — alongside
-            # dropped keys — because it over-declares (see _unbindable_params)
-            # and promoting it to a standalone gate would block working calls.
-            _props, _required = self._schema_params(func_name)
-            _unbindable = self._unbindable_params(func_name, kwargs)
-            _missing = _unbindable or (
-                sorted(_required - set(kwargs)) if _dropped_keys else []
-            )
-            if _missing:
-                # Hand the model the schema instead of a TypeError it cannot
-                # interpret — a bare error just gets retried unchanged.
-                self._log_usage(
-                    func_name or "unknown", agent_name, ticker, cycle_id,
-                    False, 0,
-                    f"Malformed arguments: missing {_missing}",
-                )
-                if _dropped_keys:
-                    _cause = (
-                        f", and {len(_dropped_keys)} argument(s) were not part of "
-                        f"this tool's schema. This usually means the JSON was not "
-                        f"escaped correctly — check that quotes inside string values "
-                        f"are escaped and that arrays are closed"
-                    )
-                else:
-                    _cause = " and must be supplied"
-                return {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": func_name,
-                    "content": json.dumps(
-                        {
-                            "error": (
-                                f"Malformed tool arguments. Required field(s) "
-                                f"{_missing} were missing{_cause}."
-                            ),
-                            "expected_arguments": sorted(_props),
-                            "required_arguments": sorted(_required),
-                            "hint": "Re-issue the call with valid JSON matching the schema above.",
-                        }
-                    ),
-                }
-
-            # Update the parsed arguments representation
-            arguments_json = json.dumps(kwargs)
-            function_info["arguments"] = arguments_json
-            
-            normalized_args = json.dumps(kwargs, sort_keys=True, separators=(',', ':'))
-            cache_key = f"{func_name}:{normalized_args}"
-        except Exception as e:
-            logger.error(
-                "[ToolRegistry] Failed to parse JSON arguments for %s: %s | raw: %s",
-                func_name,
-                e,
-                arguments_json[:200],
-            )
-            self._log_usage(
-                func_name or "unknown",
-                agent_name,
-                ticker,
-                cycle_id,
-                False,
-                0,
-                f"JSON parse error: {e}",
-            )
-            return {
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "name": func_name,
-                "content": json.dumps(
-                    {
-                        "error": f"Invalid JSON arguments: {e}",
-                        "hint": "Please provide valid JSON arguments.",
-                    }
-                ),
-            }
+        kwargs, arguments_json, cache_key, parse_err_resp = self._parse_and_normalize_arguments(
+            func_name,
+            arguments_json,
+            function_info,
+            tool_call_id,
+            agent_name,
+            ticker,
+            cycle_id,
+        )
+        if parse_err_resp is not None or kwargs is None or cache_key is None:
+            return parse_err_resp or {}
 
         # ── Ticker-Lock Guardrail ──
-        if ticker and "ticker" in kwargs:
-            tool_ticker = str(kwargs["ticker"]).upper().strip()
-            context_ticker = str(ticker).upper().strip()
-            if tool_ticker and tool_ticker != context_ticker:
-                logger.warning(
-                    "[ToolRegistry] CROSS-CONTAMINATION BLOCKED: %s requested ticker %s but context is %s",
-                    func_name,
-                    tool_ticker,
-                    context_ticker,
-                )
-                self._log_usage(
-                    func_name, agent_name, False, 0, f"Cross-contamination blocked: {tool_ticker} != {context_ticker}"
-                )
-                return {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": func_name,
-                    "content": json.dumps({
-                        "error": f"Unauthorized ticker access. You are analyzing {context_ticker}, but you requested {tool_ticker}.",
-                        "hint": f"Only query data for the assigned ticker ({context_ticker}). For peer/competitor comparisons, use screener_query with industry filters."
-                    })
-                }
+        ticker_err = self._check_ticker_guardrail(
+            func_name, kwargs, ticker, agent_name, tool_call_id
+        )
+        if ticker_err is not None:
+            return ticker_err
 
         # ── Tool existence check ──
         if func_name not in self.tools:
@@ -868,32 +1000,11 @@ class ToolRegistry:
             }
 
         # ── Cache interception check ──
-        if tool_cache:
-            cached_content = None
-            hit_key = None
-            if cache_key in tool_cache:
-                cached_content = tool_cache[cache_key]
-                hit_key = cache_key
-            elif func_name in tool_cache:
-                cached_content = tool_cache[func_name]
-                hit_key = func_name
-
-            if cached_content is not None:
-                logger.info(
-                    "[ToolRegistry] Intercepted %s via tool_cache (%s) to prevent redundant execution.",
-                    func_name,
-                    hit_key,
-                )
-                # Log cache hit usage (0ms execution)
-                self._log_usage(
-                    func_name, agent_name, True, 0, "Cache Hit"
-                )
-                return {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "name": func_name,
-                    "content": cached_content,
-                }
+        cache_hit = self._check_tool_cache_hit(
+            tool_cache, cache_key, func_name, agent_name, tool_call_id
+        )
+        if cache_hit is not None:
+            return cache_hit
 
         # ── Permission check ──
         if not skip_permission_check:
@@ -962,29 +1073,9 @@ class ToolRegistry:
         # ── Execute ──
         t0 = time.monotonic()
         try:
-            import os
-            use_lazy = (
-                not force_local
-                and os.getenv("USE_LAZY_AGENT_SERVICE", "false").lower() == "true"
+            result, service_source = await self._invoke_registered_or_remote_tool(
+                func_name, kwargs, force_local
             )
-            # Bypass lazy-agent-service for save_trading_chart to execute it directly inside trading-service
-            if use_lazy and func_name != "save_trading_chart":
-                from lazycat.tools import tool_executor
-                resp_json = await tool_executor.execute_tool(func_name, kwargs)
-                if "error" in resp_json:
-                    raise RuntimeError(resp_json["error"])
-                result = resp_json.get("content", "")
-                service_source = "lazy-agent-service"
-            else:
-                service_source = "trading-service"
-                func = self.tools[func_name]
-                if func is None:
-                    raise RuntimeError(f"Tool '{func_name}' has no local registration function in this service context.")
-                if inspect.iscoroutinefunction(func):
-                    result = await func(**kwargs)
-                else:
-                    result = func(**kwargs)
-
             if not isinstance(result, str):
                 result = json.dumps(result)
 

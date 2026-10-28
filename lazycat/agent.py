@@ -288,6 +288,256 @@ class AgentHarness:
         self.last_model: str | None = None
         self.last_provider: str | None = None
 
+    def _notify_tool_result_hook(
+        self,
+        func_name: str,
+        arguments: Any,
+        result: Any,
+        was_blocked: bool,
+        elapsed_ms: int,
+    ) -> None:
+        if self.on_tool_result is None:
+            return
+        try:
+            self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
+        except Exception as hook_err:
+            # Hooks are observational and must not kill a run —
+            # EXCEPT when the hook explicitly asks to abort
+            # (guard exceptions set abort_agent_run=True, e.g.
+            # doom-loop detectors). Swallowing those made every
+            # caller-side loop guard a silent no-op.
+            if getattr(hook_err, "abort_agent_run", False):
+                raise
+            logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
+
+    def _handle_prism_tool_execution_event(
+        self, data: dict, prism_tool_started: dict[str, float]
+    ) -> None:
+        status = data.get("status")
+        tool_payload = data.get("tool") or data.get("toolCall", {})
+        func_name = tool_payload.get("name", "")
+        # Prism already executed this one, so we cannot refuse
+        # it — but a silent `{}` here strips the args off the
+        # telemetry row and makes a malformed-payload defect
+        # look like a tool that takes no arguments.
+        arguments, arg_error = decode_tool_arguments(
+            tool_payload.get("args") or tool_payload.get("arguments")
+        )
+        if arg_error:
+            logger.warning(
+                f"[{self.agent.name}] agent-internal {func_name} "
+                f"had undecodable arguments; telemetry will "
+                f"record none: {arg_error.splitlines()[0]}"
+            )
+
+        if status == "calling":
+            # Prism announces the call before executing it, so
+            # the round trip IS measurable from here. Without
+            # this, every prism-internal tool was recorded at
+            # elapsed_ms=0 (the branch below hardcoded it),
+            # which is nearly all of them — a trading-service
+            # audit on 2026-07-27 found all 8 lazy_web_search
+            # failures logged as 0ms, making a fast refusal
+            # indistinguishable from a 20s connect timeout.
+            prism_tool_started[func_name] = time.time()
+        elif status in ("done", "error"):
+            # This was executed internally by Prism. We record it!
+            result = (
+                tool_payload.get("result")
+                if tool_payload.get("result") is not None
+                else data.get("toolResult")
+            )
+            _t0 = prism_tool_started.pop(func_name, None)
+            # 0 still means "not measurable" — a missing
+            # `calling` event, not a 0ms call.
+            elapsed_ms = int((time.time() - _t0) * 1000) if _t0 else 0
+            self._notify_tool_result_hook(func_name, arguments, result, False, elapsed_ms)
+
+    def _record_stream_usage(self, request_usage: dict) -> None:
+        if not request_usage:
+            return
+        self.last_usage = request_usage
+        input_tok = int(request_usage.get("inputTokens") or 0)
+        output_tok = int(request_usage.get("outputTokens") or 0)
+        reasoning_tok = int(request_usage.get("reasoningOutputTokens") or 0)
+        completion = output_tok + reasoning_tok
+        self.total_tokens += input_tok + completion
+        self.completion_tokens += completion
+        self.usage_requests += 1
+        self.prompt_tokens += input_tok
+        self.reasoning_tokens += reasoning_tok
+
+    def _apply_done_event(self, data: dict) -> None:
+        if data.get("model"):
+            self.last_model = data["model"]
+        if data.get("provider"):
+            self.last_provider = data["provider"]
+
+    async def _consume_agent_stream(
+        self, resp: Any, prism_tool_started: dict[str, float]
+    ) -> tuple[str, list, bool]:
+        content = ""
+        tool_calls: list = []
+        request_usage: dict = {}
+        stream_done = False
+        try:
+            async for data in iter_sse_json_lines(resp.aiter_lines(), done_sentinel="[DONE]"):
+                event_type = data.get("type")
+                if event_type == "chunk":
+                    chunk_text = data.get("content", "")
+                    content += chunk_text
+                    # Opt-in only: echoing every token to stdout from
+                    # concurrent agents interleaves raw model text
+                    # character-by-character with the service log stream
+                    # (observed corrupting trading-service docker logs).
+                    if _STREAM_STDOUT:
+                        print(chunk_text, end="", flush=True)
+                elif event_type == "tool_calls" or "toolCalls" in data:
+                    tool_calls = data.get("toolCalls", [])
+                elif event_type == "tool_execution":
+                    self._handle_prism_tool_execution_event(data, prism_tool_started)
+                elif event_type == "usage_update":
+                    usage = data.get("usage")
+                    if isinstance(usage, dict):
+                        request_usage = usage
+                elif event_type == "done":
+                    stream_done = True
+                    self._apply_done_event(data)
+                elif event_type == "error":
+                    # Terminal: a mid-stream `error` means the model died
+                    # after emitting partial text. Committing that partial
+                    # content as the assistant answer booked a failure as
+                    # a successful turn (2026-10-20 cut-stream audit:
+                    # 'probeprobeprobe...' returned as the answer), so
+                    # stop consuming and fail the turn instead.
+                    raise RuntimeError(
+                        f"Agent stream error: {data.get('message') or 'unknown error'}"
+                    )
+                elif "text" in data and not event_type:
+                    content = data.get("text", content)
+                    tool_calls = data.get("toolCalls", tool_calls)
+
+            print()  # flush newline after stream completes
+        finally:
+            # The last usage snapshot is cumulative for this stream. Record
+            # it once, including when cancellation interrupts generation.
+            self._record_stream_usage(request_usage)
+            await resp.aclose()
+        return content, tool_calls, stream_done
+
+    @staticmethod
+    def _decode_tool_call_entry(tc: dict) -> tuple[str, str, Any, str | None]:
+        tc_id = tc.get("id", "")
+        if "function" in tc:
+            func = tc.get("function", {})
+            func_name = func.get("name", "")
+            arguments, arg_error = decode_tool_arguments(func.get("arguments"))
+        else:
+            func_name = tc.get("name", "")
+            # `or` (not `is None`) preserves the original fallthrough:
+            # an empty `arguments` defers to `args`.
+            raw_arguments = tc.get("arguments") or tc.get("args")
+            arguments, arg_error = decode_tool_arguments(raw_arguments)
+        return tc_id, func_name, arguments, arg_error
+
+    def _check_tool_override(self, func_name: str, arguments: Any) -> Any:
+        loop_block_msg = self.loop_detector.record_call(func_name, arguments, failed=True)
+        if loop_block_msg:
+            return loop_block_msg
+        # Undo the speculative failure record
+        key = self.loop_detector._make_key(func_name, arguments, failed=True)
+        self.loop_detector._history[key] = max(0, self.loop_detector._history.get(key, 1) - 1)
+        if self.on_tool_call is not None:
+            return self.on_tool_call(func_name, arguments)
+        return None
+
+    @staticmethod
+    def _is_tool_result_failed(result: Any) -> bool:
+        if isinstance(result, dict):
+            return bool(result.get("error") or result.get("is_error") or not result)
+        return result is None
+
+    async def _invoke_remote_tool(
+        self, func_name: str, arguments: Any
+    ) -> tuple[Any, int]:
+        # Execute via the tool service proxy. Stamp identity
+        # headers so the proxy's per-conversation whitelist can
+        # actually key on this session (it fails open otherwise).
+        identity_headers = {"x-agent": self.agent.name}
+        get_conv = getattr(self.agent.llm_client, "get_conversation_id", None)
+        if callable(get_conv):
+            conv_id = get_conv(self.agent.name, self.session.session_id)
+            if conv_id:
+                identity_headers["x-conversation-id"] = conv_id
+        t0_tool = time.time()
+        result = await tool_executor.execute_tool(
+            func_name, arguments, headers=identity_headers
+        )
+        elapsed_ms = int((time.time() - t0_tool) * 1000)
+        self.loop_detector.record_call(
+            func_name, arguments, failed=self._is_tool_result_failed(result)
+        )
+        return result, elapsed_ms
+
+    def _format_tool_result_str(self, func_name: str, result: Any) -> str:
+        import json
+
+        result_str = json.dumps(result, default=str)
+        if len(result_str) > self.max_tool_result_chars:
+            logger.warning(
+                f"[{self.agent.name}] Truncating tool result for {func_name}: "
+                f"{len(result_str):,} chars → {self.max_tool_result_chars:,} chars"
+            )
+            result_str = result_str[: self.max_tool_result_chars] + (
+                f"\n\n[TRUNCATED: result was {len(result_str):,} chars, "
+                f"showing first {self.max_tool_result_chars:,}]"
+            )
+        return result_str
+
+    async def _dispatch_single_tool_call(self, tc: dict) -> None:
+        tc_id, func_name, arguments, arg_error = self._decode_tool_call_entry(tc)
+        logger.info(f"[{self.agent.name}] Executing tool: {func_name}")
+        elapsed_ms = 0
+
+        # Malformed arguments: tell the model, do NOT run the tool with
+        # `{}`. Running it anyway produces a misleading "required field
+        # missing" rejection that hides the real defect, and burns the
+        # turn — see decode_tool_arguments().
+        if arg_error is not None:
+            logger.warning(
+                f"[{self.agent.name}] Malformed arguments for "
+                f"{func_name}: {arg_error.splitlines()[0]}"
+            )
+            result: Any = {"error": arg_error, "is_error": True}
+            was_blocked = False
+            self.loop_detector.record_call(func_name, arguments, failed=True)
+        # Check for human-in-the-loop pauses
+        elif func_name in ("ask_user_question", "request_plan_approval"):
+            result = await self._handle_pausing_tool(func_name, arguments)
+            was_blocked = False
+        else:
+            override_result = self._check_tool_override(func_name, arguments)
+            if override_result is not None:
+                # Hook blocked this call — use override as result
+                logger.warning(f"[{self.agent.name}] Tool call blocked: {func_name}")
+                result = {"blocked": True, "message": override_result}
+                was_blocked = True
+            else:
+                result, elapsed_ms = await self._invoke_remote_tool(func_name, arguments)
+                was_blocked = False
+
+        # Notify post-call hook (e.g. ToolLoopDetector records outcome)
+        if func_name not in ("ask_user_question", "request_plan_approval"):
+            self._notify_tool_result_hook(func_name, arguments, result, was_blocked, elapsed_ms)
+
+        # 5. Add result to history (truncate oversized payloads to prevent context overflow)
+        result_str = self._format_tool_result_str(func_name, result)
+        self.session.add_tool_message(
+            tool_call_id=tc_id,
+            name=func_name,
+            content=result_str,
+        )
+
     async def run(self, user_input: str | None = None) -> str:
         """Run the agent loop until it completes or reaches max iterations."""
         if user_input:
@@ -329,113 +579,10 @@ class AgentHarness:
                 bench_task=self.bench_task or self.agent.name,
                 inline_system_prompt=False,
             )
-            
-            content = ""
-            tool_calls = []
-            request_usage: dict = {}
-            stream_done = False
 
-            import json
-            try:
-                async for data in iter_sse_json_lines(resp.aiter_lines(), done_sentinel="[DONE]"):
-                    event_type = data.get("type")
-                    if event_type == "chunk":
-                        chunk_text = data.get("content", "")
-                        content += chunk_text
-                        # Opt-in only: echoing every token to stdout from
-                        # concurrent agents interleaves raw model text
-                        # character-by-character with the service log stream
-                        # (observed corrupting trading-service docker logs).
-                        if _STREAM_STDOUT:
-                            print(chunk_text, end="", flush=True)
-                    elif event_type == "tool_calls" or "toolCalls" in data:
-                        tool_calls = data.get("toolCalls", [])
-                    elif event_type == "tool_execution":
-                        status = data.get("status")
-                        tool_payload = data.get("tool") or data.get("toolCall", {})
-                        func_name = tool_payload.get("name", "")
-                        # Prism already executed this one, so we cannot refuse
-                        # it — but a silent `{}` here strips the args off the
-                        # telemetry row and makes a malformed-payload defect
-                        # look like a tool that takes no arguments.
-                        arguments, arg_error = decode_tool_arguments(
-                            tool_payload.get("args") or tool_payload.get("arguments")
-                        )
-                        if arg_error:
-                            logger.warning(
-                                f"[{self.agent.name}] agent-internal {func_name} "
-                                f"had undecodable arguments; telemetry will "
-                                f"record none: {arg_error.splitlines()[0]}"
-                            )
-                        
-                        if status == "calling":
-                            # Prism announces the call before executing it, so
-                            # the round trip IS measurable from here. Without
-                            # this, every prism-internal tool was recorded at
-                            # elapsed_ms=0 (the branch below hardcoded it),
-                            # which is nearly all of them — a trading-service
-                            # audit on 2026-07-27 found all 8 lazy_web_search
-                            # failures logged as 0ms, making a fast refusal
-                            # indistinguishable from a 20s connect timeout.
-                            prism_tool_started[func_name] = time.time()
-                        elif status in ("done", "error"):
-                            # This was executed internally by Prism. We record it!
-                            result = tool_payload.get("result") if tool_payload.get("result") is not None else data.get("toolResult")
-                            was_blocked = False
-                            if self.on_tool_result is not None:
-                                try:
-                                    _t0 = prism_tool_started.pop(func_name, None)
-                                    # 0 still means "not measurable" — a missing
-                                    # `calling` event, not a 0ms call.
-                                    elapsed_ms = int((time.time() - _t0) * 1000) if _t0 else 0
-                                    self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
-                                except Exception as hook_err:
-                                    # Hooks are observational and must not kill a run —
-                                    # EXCEPT when the hook explicitly asks to abort
-                                    # (guard exceptions set abort_agent_run=True, e.g.
-                                    # doom-loop detectors). Swallowing those made every
-                                    # caller-side loop guard a silent no-op.
-                                    if getattr(hook_err, "abort_agent_run", False):
-                                        raise
-                                    logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
-                    elif event_type == "usage_update":
-                        usage = data.get("usage")
-                        if isinstance(usage, dict):
-                            request_usage = usage
-                    elif event_type == "done":
-                        stream_done = True
-                        if data.get("model"):
-                            self.last_model = data["model"]
-                        if data.get("provider"):
-                            self.last_provider = data["provider"]
-                    elif event_type == "error":
-                        # Terminal: a mid-stream `error` means the model died
-                        # after emitting partial text. Committing that partial
-                        # content as the assistant answer booked a failure as
-                        # a successful turn (2026-10-20 cut-stream audit:
-                        # 'probeprobeprobe...' returned as the answer), so
-                        # stop consuming and fail the turn instead.
-                        raise RuntimeError(
-                            f"Agent stream error: {data.get('message') or 'unknown error'}"
-                        )
-                    elif "text" in data and not event_type:
-                        content = data.get("text", content)
-                        tool_calls = data.get("toolCalls", tool_calls)
-
-                print() # flush newline after stream completes
-            finally:
-                # The last usage snapshot is cumulative for this stream. Record
-                # it once, including when cancellation interrupts generation.
-                if request_usage:
-                    self.last_usage = request_usage
-                    completion = (int(request_usage.get("outputTokens") or 0)
-                                  + int(request_usage.get("reasoningOutputTokens") or 0))
-                    self.total_tokens += int(request_usage.get("inputTokens") or 0) + completion
-                    self.completion_tokens += completion
-                    self.usage_requests += 1
-                    self.prompt_tokens += int(request_usage.get("inputTokens") or 0)
-                    self.reasoning_tokens += int(request_usage.get("reasoningOutputTokens") or 0)
-                await resp.aclose()
+            content, tool_calls, stream_done = await self._consume_agent_stream(
+                resp, prism_tool_started
+            )
 
             # A stream that ends without a `done` event (and without the
             # [DONE] sentinel) was cut mid-generation — e.g. gateway crash,
@@ -457,112 +604,7 @@ class AgentHarness:
                 
             # 4. Dispatch tool calls
             for tc in tool_calls:
-                tc_id = tc.get("id", "")
-                if "function" in tc:
-                    func = tc.get("function", {})
-                    func_name = func.get("name", "")
-                    arguments, arg_error = decode_tool_arguments(func.get("arguments"))
-                else:
-                    func_name = tc.get("name", "")
-                    # `or` (not `is None`) preserves the original fallthrough:
-                    # an empty `arguments` defers to `args`.
-                    raw_arguments = tc.get("arguments") or tc.get("args")
-                    arguments, arg_error = decode_tool_arguments(raw_arguments)
-
-                logger.info(f"[{self.agent.name}] Executing tool: {func_name}")
-                elapsed_ms = 0
-
-                # Malformed arguments: tell the model, do NOT run the tool with
-                # `{}`. Running it anyway produces a misleading "required field
-                # missing" rejection that hides the real defect, and burns the
-                # turn — see decode_tool_arguments().
-                if arg_error is not None:
-                    logger.warning(
-                        f"[{self.agent.name}] Malformed arguments for "
-                        f"{func_name}: {arg_error.splitlines()[0]}"
-                    )
-                    result = {"error": arg_error, "is_error": True}
-                    was_blocked = False
-                    self.loop_detector.record_call(func_name, arguments, failed=True)
-                # Check for human-in-the-loop pauses
-                elif func_name in ("ask_user_question", "request_plan_approval"):
-                    result = await self._handle_pausing_tool(func_name, arguments)
-                    was_blocked = False
-                else:
-                    override_result = None
-                    # Internal loop detection
-                    loop_block_msg = self.loop_detector.record_call(func_name, arguments, failed=True)
-                    if loop_block_msg:
-                        override_result = loop_block_msg
-                    else:
-                        # Undo the speculative failure record
-                        key = self.loop_detector._make_key(func_name, arguments, failed=True)
-                        self.loop_detector._history[key] = max(0, self.loop_detector._history.get(key, 1) - 1)
-                    
-                    # External Hook
-                    if override_result is None and self.on_tool_call is not None:
-                        override_result = self.on_tool_call(func_name, arguments)
-                    
-                    if override_result is not None:
-                        # Hook blocked this call — use override as result
-                        logger.warning(f"[{self.agent.name}] Tool call blocked: {func_name}")
-                        result = {"blocked": True, "message": override_result}
-                        was_blocked = True
-                    else:
-                        # Execute via the tool service proxy. Stamp identity
-                        # headers so the proxy's per-conversation whitelist can
-                        # actually key on this session (it fails open otherwise).
-                        identity_headers = {"x-agent": self.agent.name}
-                        get_conv = getattr(self.agent.llm_client, "get_conversation_id", None)
-                        if callable(get_conv):
-                            conv_id = get_conv(self.agent.name, self.session.session_id)
-                            if conv_id:
-                                identity_headers["x-conversation-id"] = conv_id
-                        t0_tool = time.time()
-                        result = await tool_executor.execute_tool(
-                            func_name, arguments, headers=identity_headers
-                        )
-                        elapsed_ms = int((time.time() - t0_tool) * 1000)
-                        was_blocked = False
-                        
-                        # Record actual outcome
-                        failed = False
-                        if isinstance(result, dict):
-                            if result.get("error") or result.get("is_error"):
-                                failed = True
-                            elif not result:
-                                failed = True
-                        elif result is None:
-                            failed = True
-                        
-                        self.loop_detector.record_call(func_name, arguments, failed=failed)
-                
-                # Notify post-call hook (e.g. ToolLoopDetector records outcome)
-                if self.on_tool_result is not None and func_name not in ("ask_user_question", "request_plan_approval"):
-                    try:
-                        self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
-                    except Exception as hook_err:
-                        # Same abort contract as the prism-internal tool site above.
-                        if getattr(hook_err, "abort_agent_run", False):
-                            raise
-                        logger.warning(f"[{self.agent.name}] on_tool_result hook error: {hook_err}")
-                
-                # 5. Add result to history (truncate oversized payloads to prevent context overflow)
-                result_str = json.dumps(result, default=str)
-                if len(result_str) > self.max_tool_result_chars:
-                    logger.warning(
-                        f"[{self.agent.name}] Truncating tool result for {func_name}: "
-                        f"{len(result_str):,} chars → {self.max_tool_result_chars:,} chars"
-                    )
-                    result_str = result_str[:self.max_tool_result_chars] + (
-                        f'\n\n[TRUNCATED: result was {len(result_str):,} chars, '
-                        f'showing first {self.max_tool_result_chars:,}]'
-                    )
-                self.session.add_tool_message(
-                    tool_call_id=tc_id,
-                    name=func_name,
-                    content=result_str,
-                )
+                await self._dispatch_single_tool_call(tc)
                 
         logger.warning(f"[{self.agent.name}] Reached max iterations ({self.max_iterations})")
         return "Max iterations reached without a final answer."
