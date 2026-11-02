@@ -38,6 +38,7 @@ from typing import Any, Optional
 
 import httpx
 
+from .llm_json import parse_json_response
 from .logging import get_logger
 from .sse import iter_sse_json
 
@@ -117,24 +118,14 @@ def _build_system_prompt(topic: str, schema: Optional[dict], domain: Optional[st
 
 
 def _extract_json(text: str) -> Optional[dict]:
-    """Best-effort: pull the first balanced JSON object out of free text (the
-    fallback when the agent narrated the answer instead of calling the tool)."""
-    start = text.find("{")
-    while start != -1:
-        depth = 0
-        for i in range(start, len(text)):
-            c = text[i]
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start : i + 1])
-                    except json.JSONDecodeError:
-                        break
-        start = text.find("{", start + 1)
-    return None
+    """Best-effort: pull the first JSON object out of free text (the fallback
+    when the agent narrated the answer instead of calling the tool). Delegates
+    to ``llm_json.parse_json_response``; returns None when nothing parses."""
+    try:
+        parsed = parse_json_response(text or "")
+    except ValueError:
+        return None
+    return parsed or None
 
 
 async def research(

@@ -1,6 +1,8 @@
 import json
 import secrets
 import pytest
+
+pytest.importorskip("respx")
 import respx
 import httpx
 from pydantic import ValidationError

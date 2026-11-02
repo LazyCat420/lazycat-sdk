@@ -396,10 +396,6 @@ class AgentClient:
         self._sessions[group_key] = session_id
         return session_id, True
 
-    def end_session(self, group_key: str):
-        self._sessions.pop(group_key, None)
-        self._conversations.pop(group_key, None)
-
     def cleanup_all_sessions(self):
         self._sessions.clear()
         self._conversations.clear()
