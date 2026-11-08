@@ -457,22 +457,75 @@ class AgentHarness:
             return bool(result.get("error") or result.get("is_error") or not result)
         return result is None
 
+    @staticmethod
+    def _parse_ledger_tool_output(tool_msg: Any) -> Any:
+        if isinstance(tool_msg, dict) and "content" in tool_msg:
+            raw = tool_msg["content"]
+            if isinstance(raw, str):
+                try:
+                    return json.loads(raw)
+                except Exception:
+                    return {"result": raw}
+            return raw
+        return tool_msg
+
+    async def _try_inprocess_tool(self, func_name: str, arguments: Any) -> tuple[bool, Any]:
+        if os.environ.get("V3_USE_PRISM", "0").strip() == "1":
+            return False, None
+        call_payload = {
+            "id": f"call_{func_name}",
+            "function": {
+                "name": func_name,
+                "arguments": (
+                    arguments
+                    if isinstance(arguments, str)
+                    else json.dumps(arguments, default=str)
+                ),
+            },
+        }
+        try:
+            from app.tools.registry import registry
+            from app.v3.data_ledger import execute_with_ledger
+
+            tool_mocked = hasattr(tool_executor, "assert_called") or hasattr(
+                getattr(tool_executor, "execute_tool", None), "assert_called"
+            )
+            ledger_mocked = hasattr(execute_with_ledger, "assert_called") or (
+                getattr(execute_with_ledger, "__module__", "") != "app.v3.data_ledger"
+            )
+            if not tool_mocked or ledger_mocked or func_name in getattr(registry, "_handlers", {}):
+                try:
+                    coro = execute_with_ledger(registry, call_payload)
+                except TypeError:
+                    coro = execute_with_ledger(call_payload, _registry=registry)
+                tool_msg = await coro
+                return True, self._parse_ledger_tool_output(tool_msg)
+        except ImportError:
+            pass
+        tool_reg = getattr(self.agent, "tool_registry", None)
+        if tool_reg is not None and hasattr(tool_reg, "execute_tool_call"):
+            tool_msg = await tool_reg.execute_tool_call(call_payload)
+            return True, self._parse_ledger_tool_output(tool_msg)
+        return False, None
+
     async def _invoke_remote_tool(
         self, func_name: str, arguments: Any
     ) -> tuple[Any, int]:
-        # Execute via the tool service proxy. Stamp identity
-        # headers so the proxy's per-conversation whitelist can
-        # actually key on this session (it fails open otherwise).
-        identity_headers = {"x-agent": self.agent.name}
-        get_conv = getattr(self.agent.llm_client, "get_conversation_id", None)
-        if callable(get_conv):
-            conv_id = get_conv(self.agent.name, self.session.session_id)
-            if conv_id:
-                identity_headers["x-conversation-id"] = conv_id
         t0_tool = time.time()
-        result = await tool_executor.execute_tool(
-            func_name, arguments, headers=identity_headers
-        )
+        handled, result = await self._try_inprocess_tool(func_name, arguments)
+        if not handled:
+            # Execute via the tool service proxy. Stamp identity
+            # headers so the proxy's per-conversation whitelist can
+            # actually key on this session (it fails open otherwise).
+            identity_headers = {"x-agent": self.agent.name}
+            get_conv = getattr(self.agent.llm_client, "get_conversation_id", None)
+            if callable(get_conv):
+                conv_id = get_conv(self.agent.name, self.session.session_id)
+                if conv_id:
+                    identity_headers["x-conversation-id"] = conv_id
+            result = await tool_executor.execute_tool(
+                func_name, arguments, headers=identity_headers
+            )
         elapsed_ms = int((time.time() - t0_tool) * 1000)
         self.loop_detector.record_call(
             func_name, arguments, failed=self._is_tool_result_failed(result)

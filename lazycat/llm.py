@@ -99,23 +99,83 @@ def clear_bench_context() -> None:
 #: layer sends `reasoning`; the OpenAI spelling is `reasoning_content`.
 _REASONING_FIELDS = ("reasoning", "reasoning_content")
 
+_DIRECT_OPENAI_PROVIDERS = frozenset({
+    "vllm",
+    "vllm-1",
+    "vllm-2",
+    "vllm-3",
+    "vllm-4",
+    "vllm-5",
+    "dgx_spark",
+    "dgx-spark",
+    "gold_spark",
+    "gold-spark",
+    "jetson",
+    "jetson-2",
+    "qwen",
+    "qwen-next",
+    "dell1",
+    "dell2",
+    "local",
+    "local-vllm",
+    "openai-local",
+})
+
+
+def _use_prism_gateway() -> bool:
+    return os.environ.get("V3_USE_PRISM", "0").strip() == "1"
+
+
+def _is_direct_openai_provider(provider: str | None) -> bool:
+    if _use_prism_gateway() or not provider:
+        return False
+    norm = provider.strip().lower()
+    return norm in _DIRECT_OPENAI_PROVIDERS or norm.startswith(
+        ("vllm", "dgx", "jetson", "qwen", "dell", "local")
+    )
+
+
+def _normalize_openai_usage(usage: dict | None) -> dict:
+    if not isinstance(usage, dict) or not usage:
+        return {}
+    inp = int(usage.get("inputTokens") or usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    out = int(usage.get("outputTokens") or usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    reas = int(usage.get("reasoningOutputTokens") or usage.get("reasoning_tokens") or 0)
+    total = int(usage.get("totalTokens") or usage.get("total_tokens") or (inp + out + reas))
+    return {
+        **usage,
+        "inputTokens": inp,
+        "outputTokens": out,
+        "reasoningOutputTokens": reas,
+        "totalTokens": total,
+        "prompt_tokens": inp,
+        "completion_tokens": out,
+        "total_tokens": total,
+    }
+
 
 class LLMStreamWrapper:
-    def __init__(self, response: httpx.Response, is_openai: bool = False):
+    def __init__(
+        self,
+        response: httpx.Response,
+        is_openai: bool = False,
+        model: str | None = None,
+        provider: str | None = None,
+    ):
         self.response = response
         self.is_openai = is_openai
-        # OpenAI streams tool calls as PARTIAL deltas (first delta carries
-        # id+name, later deltas carry argument fragments keyed by index).
-        # Accumulate here and emit ONE complete toolCalls event at the end —
-        # emitting per-delta made the consumer replace its list each time,
-        # losing names and argument fragments (multi-tool calls broke too).
+        self.model = model
+        self.provider = provider
+        self._seen_model: str | None = model
+        self._seen_usage: dict | None = None
+        self._saw_finish_reason: bool = False
         self._pending_tool_calls: dict[int, dict] = {}
 
     def _accumulate_tool_deltas(self, deltas: list[dict]) -> None:
         for tc in deltas:
             idx = tc.get("index", 0)
             entry = self._pending_tool_calls.setdefault(
-                idx, {"id": "", "function": {"name": "", "arguments": ""}}
+                idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
             )
             if tc.get("id"):
                 entry["id"] = tc["id"]
@@ -131,11 +191,69 @@ class LLMStreamWrapper:
         tool_calls = []
         for idx in sorted(self._pending_tool_calls):
             entry = self._pending_tool_calls[idx]
+            if not entry.get("id"):
+                entry["id"] = f"call_{entry['function']['name'] or idx}"
             if not entry["function"]["arguments"]:
                 entry["function"]["arguments"] = "{}"
             tool_calls.append(entry)
         self._pending_tool_calls = {}
-        return f"data: {json.dumps({'toolCalls': tool_calls})}"
+        return f"data: {json.dumps({'type': 'tool_calls', 'toolCalls': tool_calls})}"
+
+    def _build_done_event(self) -> str:
+        done_evt: dict[str, Any] = {"type": "done"}
+        model = getattr(self, "_seen_model", None) or getattr(self, "model", None)
+        provider = getattr(self, "provider", None)
+        usage = getattr(self, "_seen_usage", None)
+        if model:
+            done_evt["model"] = model
+        if provider:
+            done_evt["provider"] = provider
+        if usage:
+            done_evt["usage"] = usage
+        return f"data: {json.dumps(done_evt)}"
+
+    async def _iter_openai_raw_lines(self):
+        if hasattr(self.response, "aiter_text"):
+            text_iter = self.response.aiter_text()
+            if hasattr(text_iter, "__aiter__"):
+                async for line in iter_sse_lines(text_iter):
+                    yield line
+                return
+        if hasattr(self.response, "aiter_lines"):
+            async for line in self.response.aiter_lines():
+                stripped = line.strip()
+                if stripped:
+                    yield stripped
+
+    def _extract_delta_events(self, data: dict) -> list[str]:
+        out: list[str] = []
+        if isinstance(data.get("model"), str) and data["model"]:
+            self._seen_model = data["model"]
+        norm_usage = _normalize_openai_usage(data.get("usage"))
+        if norm_usage:
+            self._seen_usage = norm_usage
+            out.append(f"data: {json.dumps({'type': 'usage_update', 'usage': norm_usage})}")
+        choices = data.get("choices", [])
+        if not choices:
+            return out
+        choice = choices[0]
+        delta = choice.get("delta") or choice.get("message") or {}
+        chunk = delta.get("content")
+        if not (isinstance(chunk, str) and chunk):
+            chunk = next(
+                (delta[f] for f in _REASONING_FIELDS if isinstance(delta.get(f), str) and delta[f]),
+                None,
+            )
+        if chunk:
+            out.append(f"data: {json.dumps({'type': 'chunk', 'content': chunk})}")
+        if "tool_calls" in delta and delta["tool_calls"]:
+            self._accumulate_tool_deltas(delta["tool_calls"])
+        if choice.get("finish_reason"):
+            self._saw_finish_reason = True
+            flush = self._flush_tool_calls_event()
+            if flush:
+                out.append(flush)
+        return out
 
     async def aiter_lines(self):
         if not self.is_openai:
@@ -143,74 +261,74 @@ class LLMStreamWrapper:
                 yield line
             return
 
-        async for line in iter_sse_lines(self.response.aiter_text()):
+        async for line in self._iter_openai_raw_lines():
             if line == "data: [DONE]":
                 flush = self._flush_tool_calls_event()
                 if flush:
                     yield flush
+                yield self._build_done_event()
                 yield "data: [DONE]"
-                # [DONE] terminates an OpenAI-compatible stream; stop reading
-                # instead of draining the rest of the connection.
                 return
             if not line.startswith("data: "):
                 continue
-
             try:
                 data = json.loads(line[6:])
-                choices = data.get("choices", [])
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = choice.get("delta", {})
-
-                # A reasoning model streams its generation in `reasoning`
-                # deltas. Forwarding only `content` meant the consumer received
-                # NOTHING while the engine was happily generating, and its
-                # watchdog fired `Provider stream stalled: no data received for
-                # 300s` — 44 times in seven days, retried up to 5x, which is
-                # ~25 minutes burned per agent. Same root cause as the empty
-                # non-streaming replies; two very different-looking symptoms.
-                # `content` wins so a normal model emits exactly once.
-                chunk = delta.get("content")
-                if not (isinstance(chunk, str) and chunk):
-                    chunk = next((delta[f] for f in _REASONING_FIELDS
-                                  if isinstance(delta.get(f), str) and delta[f]), None)
-                if chunk:
-                    prism_data = {"type": "chunk", "content": chunk}
-                    yield f"data: {json.dumps(prism_data)}"
-
-                if "tool_calls" in delta and delta["tool_calls"]:
-                    self._accumulate_tool_deltas(delta["tool_calls"])
-
-                # vLLM/OpenAI signal completion of the tool-call block via
-                # finish_reason — flush the assembled calls as one event.
-                if choice.get("finish_reason"):
-                    flush = self._flush_tool_calls_event()
-                    if flush:
-                        yield flush
+                for evt in self._extract_delta_events(data):
+                    yield evt
             except Exception as e:
                 logger.debug("Failed decoding openai stream line: %s", e)
                 continue
+        if getattr(self, "_saw_finish_reason", False):
+            flush = self._flush_tool_calls_event()
+            if flush:
+                yield flush
+            yield self._build_done_event()
 
     async def aclose(self):
-        await self.response.aclose()
+        if hasattr(self.response, "aclose"):
+            await self.response.aclose()
 
 
 class LLMResponseWrapper:
-    def __init__(self, text: str, tool_calls: list | None = None):
+    def __init__(
+        self,
+        text: str,
+        tool_calls: list | None = None,
+        usage: dict | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        raw: dict | None = None,
+        headers: Any = None,
+    ):
         self._text = text
         self._tool_calls = tool_calls or []
-        
+        self._usage = _normalize_openai_usage(usage)
+        self._model = model
+        self._provider = provider
+        self._raw = raw or {}
+        self.headers = headers or {}
+        self.status_code = 200
+
     def json(self):
-        return {
+        res: dict[str, Any] = {
             "text": self._text,
-            "toolCalls": self._tool_calls
+            "toolCalls": self._tool_calls,
+            "tool_calls": self._tool_calls,
+            "usage": self._usage,
+            "model": self._model,
+            "provider": self._provider,
         }
-        
+        if "id" in self._raw:
+            res["id"] = self._raw["id"]
+            res["requestId"] = self._raw["id"]
+        if "choices" in self._raw:
+            res["choices"] = self._raw["choices"]
+        return res
+
     @property
     def text(self):
         return self._text
-        
+
     async def aclose(self):
         pass
 
@@ -377,15 +495,158 @@ class AgentClient:
         current_loop = asyncio.get_running_loop()
         client_loop = getattr(self, "_client_loop", None)
 
-        if self._client is not None and client_loop is not current_loop:
-            await self._client.aclose()
+        if self._client is not None and (
+            client_loop is not current_loop or type(self._client) is not httpx.AsyncClient
+        ):
+            if hasattr(self._client, "aclose"):
+                await self._client.aclose()
             self._client = None
 
-        if self._client is None or self._client.is_closed:
+        if self._client is None or getattr(self._client, "is_closed", False):
             limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
             self._client = httpx.AsyncClient(timeout=600.0, limits=limits)
             self._client_loop = current_loop
         return self._client
+
+    def _resolve_direct_openai_url(self, provider: str | None) -> str:
+        if self._url:
+            base = self._url.rstrip("/")
+            return base if base.endswith("/v1/chat/completions") else f"{base}/v1/chat/completions"
+        try:
+            from app.services.prism_agent_caller import _resolve_endpoint_url_for_provider
+
+            ep_url = _resolve_endpoint_url_for_provider(provider)
+            if ep_url:
+                base = ep_url.rstrip("/")
+                return base if base.endswith("/v1/chat/completions") else f"{base}/v1/chat/completions"
+        except Exception:
+            pass
+        base = (os.environ.get("VLLM_BASE_URL") or self.url).rstrip("/")
+        return base if base.endswith("/v1/chat/completions") else f"{base}/v1/chat/completions"
+
+    @staticmethod
+    def _build_openai_messages(messages: list[dict], system_prompt: str, agent_name: str) -> list[dict]:
+        out: list[dict] = []
+        capped_sys = _cap_system_prompt(system_prompt, agent_name) if system_prompt else ""
+        has_leading_sys = bool(messages and messages[0].get("role") == "system")
+        if capped_sys and not has_leading_sys:
+            out.append({"role": "system", "content": capped_sys})
+        for idx, m in enumerate(messages):
+            msg = dict(m)
+            if idx == 0 and has_leading_sys and capped_sys:
+                msg["content"] = capped_sys
+            elif "content" not in msg or msg["content"] is None:
+                msg["content"] = ""
+            out.append(msg)
+        return out
+
+    @staticmethod
+    def _format_openai_tools(tools: list[dict] | None, disabled_tools: list[str] | None) -> list[dict]:
+        if not tools or disabled_tools:
+            return []
+        disabled = set(disabled_tools or [])
+        out: list[dict] = []
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            if "function" in t:
+                fn = t["function"]
+                if fn.get("name") not in disabled:
+                    out.append({"type": t.get("type", "function"), "function": fn})
+            elif t.get("name") and t["name"] not in disabled:
+                out.append({
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t.get("description", ""),
+                        "parameters": t.get(
+                            "parameters",
+                            t.get("inputSchema", {"type": "object", "properties": {}}),
+                        ),
+                    },
+                })
+        return out
+
+    def _parse_openai_sync_response(
+        self, r: Any, model: str, provider: str | None
+    ) -> LLMResponseWrapper:
+        res_data = r.json() if hasattr(r, "json") else {}
+        if not isinstance(res_data, dict):
+            res_data = {}
+        choices = res_data.get("choices") or []
+        if choices:
+            msg = choices[0].get("message") or choices[0].get("delta") or {}
+            content = msg.get("content")
+            if not (isinstance(content, str) and content):
+                content = next(
+                    (msg[f] for f in _REASONING_FIELDS if isinstance(msg.get(f), str) and msg[f]),
+                    "",
+                )
+            raw_tcs = msg.get("tool_calls") or []
+        else:
+            content = res_data.get("text") or ""
+            raw_tcs = res_data.get("toolCalls") or res_data.get("tool_calls") or []
+        return LLMResponseWrapper(
+            content or "",
+            tool_calls=raw_tcs,
+            usage=res_data.get("usage"),
+            model=res_data.get("model") or model,
+            provider=res_data.get("provider") or provider,
+            raw=res_data,
+            headers=getattr(r, "headers", None),
+        )
+
+    async def _call_openai_direct(
+        self,
+        *,
+        client: Any,
+        model: str,
+        provider: str | None,
+        messages: list[dict],
+        system_prompt: str,
+        agent_name: str,
+        tools: list[dict] | None,
+        disabled_tools: list[str] | None,
+        max_tokens: int,
+        temperature: float,
+        thinking_enabled: bool | None,
+        min_p: float | None,
+        stream: bool,
+        headers: dict[str, str],
+        effective_run_id: str | None,
+    ) -> Any:
+        url = self._resolve_direct_openai_url(provider)
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": self._build_openai_messages(messages, system_prompt, agent_name),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": stream,
+            "chat_template_kwargs": {"enable_thinking": bool(thinking_enabled)},
+        }
+        if min_p is not None:
+            payload["min_p"] = min_p
+        if effective_run_id:
+            payload["user"] = effective_run_id
+        openai_tools = self._format_openai_tools(tools, disabled_tools)
+        if openai_tools:
+            payload["tools"] = openai_tools
+            payload["tool_choice"] = "auto"
+
+        if stream:
+            if hasattr(client, "build_request") and hasattr(client, "send"):
+                req = client.build_request("POST", url, json=payload, headers=headers)
+                r = await client.send(req, stream=True)
+            else:
+                r = await client.post(url, json=payload, headers=headers)
+            if hasattr(r, "raise_for_status"):
+                r.raise_for_status()
+            return LLMStreamWrapper(r, is_openai=True, model=model, provider=provider)
+
+        r = await client.post(url, json=payload, headers=headers)
+        if hasattr(r, "raise_for_status"):
+            r.raise_for_status()
+        return self._parse_openai_sync_response(r, model, provider)
 
     def _get_or_create_session(self, group_key: str) -> tuple[str | None, bool]:
         if not group_key:
@@ -532,17 +793,47 @@ class AgentClient:
         effective_run_id = bench_run_id or bench_run_id_var.get()
         effective_harness = bench_harness or bench_harness_var.get() or "trading-cycle"
         effective_task = bench_task or bench_task_var.get()
-            
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-project": project,
+            "x-username": username,
+        }
+        if effective_run_id:
+            headers["X-Bench-Harness"] = effective_harness
+            headers["X-Bench-Run"] = effective_run_id
+            if effective_task:
+                headers["X-Bench-Task"] = effective_task
+
         client = await self._get_client()
-        
+
         session_suffix = self._derive_session_suffix(session_id, messages)
         group_key = f"chat-{agent_name}{session_suffix}"
         session_id, is_new = self._get_or_create_session(group_key)
-        
+
         if group_key not in self._conversations:
             self._conversations[group_key] = str(uuid.uuid4())
         conversation_id = self._conversations[group_key]
- 
+
+        if _is_direct_openai_provider(provider):
+            return await self._call_openai_direct(
+                client=client,
+                model=model,
+                provider=provider,
+                messages=messages,
+                system_prompt=system_prompt,
+                agent_name=agent_name,
+                tools=tools,
+                disabled_tools=disabled_tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                thinking_enabled=thinking_enabled,
+                min_p=min_p,
+                stream=stream,
+                headers=headers,
+                effective_run_id=effective_run_id,
+            )
+
         # Prepend system prompt and dummy user message to align system message rewrite in prism-service.
         # This prevents double system prompt errors on Qwen/vLLM.
         new_messages = self._prepare_messages(
@@ -583,16 +874,6 @@ class AgentClient:
         payload["createSession"] = True
 
         url = f"{self.url}/agent?stream={'true' if stream else 'false'}"
-        headers = {
-            "Content-Type": "application/json",
-            "x-project": project,
-            "x-username": username,
-        }
-        if effective_run_id:
-            headers["X-Bench-Harness"] = effective_harness
-            headers["X-Bench-Run"] = effective_run_id
-            if effective_task:
-                headers["X-Bench-Task"] = effective_task
 
         logger.debug(f"[INSTRUMENTATION] agent_client.call_agent attempting to connect to: {url}")
         try:
