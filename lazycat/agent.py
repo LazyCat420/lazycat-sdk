@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any, Callable
 
-from lazycat.llm import agent_client
+from lazycat.llm import _is_direct_openai_provider, agent_client
 from lazycat.tools import tool_executor
 from lazycat.session import ConversationSession
 from lazycat.sse import format_sse, iter_sse_json_lines, iter_sse_lines
@@ -20,6 +20,11 @@ _STREAM_STDOUT = os.environ.get("LAZYCAT_STREAM_STDOUT", "").lower() in ("1", "t
 #: to locate the break, not enough to re-flood the context with the payload it
 #: just emitted.
 _MALFORMED_ARGS_ECHO_CHARS = 240
+
+_FINAL_TURN_NUDGE = (
+    "Tool budget exhausted. Do not call tools. Reply now with your final "
+    "answer in the required output format using the evidence gathered so far."
+)
 
 
 def decode_tool_arguments(raw: Any) -> tuple[dict, str | None]:
@@ -610,6 +615,19 @@ class AgentHarness:
         prism_tool_started: dict[str, float] = {}
         while iterations < self.max_iterations:
             iterations += 1
+            force_final_answer = (
+                _is_direct_openai_provider(self.agent.provider)
+                and self.max_iterations > 1
+                and iterations == self.max_iterations
+            )
+            call_messages = list(self.session.get_messages())
+            if force_final_answer:
+                call_messages.append({"role": "user", "content": _FINAL_TURN_NUDGE})
+            call_tools = (
+                None
+                if force_final_answer
+                else (self.agent.tools if self.agent.tools else None)
+            )
             
             # 1. Send messages to LLM
             # max_iterations must go over the wire: on the prism path the
@@ -619,14 +637,14 @@ class AgentHarness:
             self.total_requests += 1
             resp = await self.agent.llm_client.call_agent(
                 model=self.agent.model,
-                messages=self.session.get_messages(),
+                messages=call_messages,
                 system_prompt=self.agent.system_prompt,
                 agent_name=self.agent.name,
                 project=self.agent.project,
                 username=self.agent.username,
                 max_tokens=self.agent.max_tokens,
                 temperature=self.agent.temperature,
-                tools=self.agent.tools if self.agent.tools else None,
+                tools=call_tools,
                 provider=self.agent.provider,
                 stream=True,
                 session_id=self.session.session_id,
@@ -654,6 +672,14 @@ class AgentHarness:
                     "Agent stream ended without a done event; "
                     f"discarding {len(content)} chars of partial content"
                 )
+
+            if force_final_answer:
+                # Stray tool_calls on the forced final turn are never
+                # dispatched or recorded; an empty reply is not an answer.
+                if content:
+                    self.session.add_assistant_message(content)
+                    return content
+                break
 
             # 2. Add LLM response to history
             self.session.add_assistant_message(content, tool_calls)

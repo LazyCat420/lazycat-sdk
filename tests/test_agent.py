@@ -215,3 +215,270 @@ async def test_normal_stream_with_done_event_still_returns_text():
     assert result == "OK"
     messages = session.get_messages()
     assert messages[-1] == {"role": "assistant", "content": "OK"}
+
+
+def _make_stream_resp(content: str = "", tool_calls: list[dict] | None = None):
+    import json
+
+    resp = MagicMock()
+    resp.aclose = AsyncMock()
+
+    async def _aiter_lines():
+        if content:
+            yield f'data: {json.dumps({"type": "chunk", "content": content})}'
+        if tool_calls:
+            yield f'data: {json.dumps({"toolCalls": tool_calls})}'
+        yield 'data: {"type": "done"}'
+        yield "data: [DONE]"
+
+    resp.aiter_lines = _aiter_lines
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_direct_path_final_turn_withholds_tools_and_nudges_final_answer(monkeypatch):
+    monkeypatch.setenv("V3_USE_PRISM", "0")
+    agent = BaseAgent(
+        model="test-model", name="test_agent", system_prompt="sys", provider="vllm"
+    )
+    agent.add_tool({"name": "dummy_tool", "description": "dummy"})
+    session = ConversationSession(session_id="test_final_turn")
+    harness = AgentHarness(agent=agent, session=session, max_iterations=3)
+
+    recorded_calls: list[dict] = []
+
+    async def _stub_call_agent(**kwargs):
+        recorded_calls.append(
+            {"tools": kwargs.get("tools"), "messages": list(kwargs.get("messages", []))}
+        )
+        if kwargs.get("tools") is not None:
+            return _make_stream_resp(
+                tool_calls=[{"id": f"call_{len(recorded_calls)}", "name": "dummy_tool", "arguments": "{}"}]
+            )
+        return _make_stream_resp(content="Final synthesized answer.")
+
+    with patch("lazycat.agent.agent_client.call_agent", side_effect=_stub_call_agent), \
+         patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"status": "ok"}
+        result = await harness.run("Analyze NVDA")
+
+    expected_nudge = (
+        "Tool budget exhausted. Do not call tools. Reply now with your final "
+        "answer in the required output format using the evidence gathered so far."
+    )
+    assert result == "Final synthesized answer."
+    assert len(recorded_calls) == harness.max_iterations == 3
+    assert recorded_calls[0]["tools"] == agent.tools
+    assert recorded_calls[1]["tools"] == agent.tools
+    assert recorded_calls[2]["tools"] is None
+    assert recorded_calls[2]["messages"][-1] == {
+        "role": "user",
+        "content": expected_nudge,
+    }
+    assert all(
+        m.get("content") != expected_nudge for m in session.get_messages()
+    )
+
+
+@pytest.mark.asyncio
+async def test_prism_path_offers_tools_on_every_call(monkeypatch):
+    monkeypatch.setenv("V3_USE_PRISM", "1")
+    agent = BaseAgent(
+        model="test-model", name="test_agent", system_prompt="sys", provider="vllm"
+    )
+    agent.add_tool({"name": "dummy_tool", "description": "dummy"})
+    session = ConversationSession(session_id="test_prism_path")
+    harness = AgentHarness(agent=agent, session=session, max_iterations=3)
+
+    recorded_calls: list[dict] = []
+
+    async def _stub_call_agent(**kwargs):
+        recorded_calls.append(
+            {"tools": kwargs.get("tools"), "messages": list(kwargs.get("messages", []))}
+        )
+        if kwargs.get("tools") is not None:
+            return _make_stream_resp(
+                tool_calls=[{"id": f"call_{len(recorded_calls)}", "name": "dummy_tool", "arguments": "{}"}]
+            )
+        return _make_stream_resp(content="Should not reach tools=None on prism")
+
+    with patch("lazycat.agent.agent_client.call_agent", side_effect=_stub_call_agent), \
+         patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"status": "ok"}
+        result = await harness.run("Analyze NVDA")
+
+    assert result == "Max iterations reached without a final answer."
+    assert len(recorded_calls) == 3
+    assert all(call["tools"] == agent.tools for call in recorded_calls)
+
+
+@pytest.mark.asyncio
+async def test_max_iterations_one_direct_still_offers_tools(monkeypatch):
+    monkeypatch.setenv("V3_USE_PRISM", "0")
+    agent = BaseAgent(
+        model="test-model", name="test_agent", system_prompt="sys", provider="vllm"
+    )
+    agent.add_tool({"name": "dummy_tool", "description": "dummy"})
+    session = ConversationSession(session_id="test_max_iter_1")
+    harness = AgentHarness(agent=agent, session=session, max_iterations=1)
+
+    recorded_calls: list[dict] = []
+
+    async def _stub_call_agent(**kwargs):
+        recorded_calls.append(
+            {"tools": kwargs.get("tools"), "messages": list(kwargs.get("messages", []))}
+        )
+        return _make_stream_resp(
+            tool_calls=[{"id": "call_1", "name": "dummy_tool", "arguments": "{}"}]
+        )
+
+    with patch("lazycat.agent.agent_client.call_agent", side_effect=_stub_call_agent), \
+         patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"status": "ok"}
+        result = await harness.run("Analyze NVDA")
+
+    assert result == "Max iterations reached without a final answer."
+    assert len(recorded_calls) == 1
+    assert recorded_calls[0]["tools"] == agent.tools
+
+
+@pytest.mark.asyncio
+async def test_direct_path_final_turn_ignores_tool_calls_if_still_returned(monkeypatch):
+    monkeypatch.setenv("V3_USE_PRISM", "0")
+    agent = BaseAgent(
+        model="test-model", name="test_agent", system_prompt="sys", provider="vllm"
+    )
+    agent.add_tool({"name": "dummy_tool", "description": "dummy"})
+
+    # 1) Non-empty content alongside ignored tool_calls -> returns content without executing final tool
+    session1 = ConversationSession(session_id="test_final_tc_content")
+    harness1 = AgentHarness(agent=agent, session=session1, max_iterations=2)
+    responses1 = [
+        _make_stream_resp(tool_calls=[{"id": "c1", "name": "dummy_tool", "arguments": "{}"}]),
+        _make_stream_resp(
+            content="Answer despite stray tool call.",
+            tool_calls=[{"id": "c2", "name": "dummy_tool", "arguments": "{}"}],
+        ),
+    ]
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock, side_effect=responses1), \
+         patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec1:
+        mock_exec1.return_value = {"status": "ok"}
+        res1 = await harness1.run("Analyze NVDA")
+    assert res1 == "Answer despite stray tool call."
+    assert mock_exec1.call_count == 1
+
+    # 2) Empty content alongside ignored tool_calls -> returns max-iterations fallback without executing final tool
+    session2 = ConversationSession(session_id="test_final_tc_empty")
+    harness2 = AgentHarness(agent=agent, session=session2, max_iterations=2)
+    responses2 = [
+        _make_stream_resp(tool_calls=[{"id": "c1", "name": "dummy_tool", "arguments": "{}"}]),
+        _make_stream_resp(
+            content="",
+            tool_calls=[{"id": "c2", "name": "dummy_tool", "arguments": "{}"}],
+        ),
+    ]
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock, side_effect=responses2), \
+         patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec2:
+        mock_exec2.return_value = {"status": "ok"}
+        res2 = await harness2.run("Analyze NVDA")
+    assert res2 == "Max iterations reached without a final answer."
+    assert mock_exec2.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_path_final_turn_empty_reply_adds_no_assistant_message(monkeypatch):
+    """An empty forced-final reply is not an answer: the loop must break to
+    the max-iterations fallback without booking an empty assistant turn into
+    the session (the old `and tool_calls` guard let this fall through to the
+    normal history-append path)."""
+    monkeypatch.setenv("V3_USE_PRISM", "0")
+    agent = BaseAgent(
+        model="test-model", name="test_agent", system_prompt="sys", provider="vllm"
+    )
+    agent.add_tool({"name": "dummy_tool", "description": "dummy"})
+    session = ConversationSession(session_id="test_final_turn_no_content")
+    harness = AgentHarness(agent=agent, session=session, max_iterations=2)
+
+    responses = [
+        _make_stream_resp(tool_calls=[{"id": "c1", "name": "dummy_tool", "arguments": "{}"}]),
+        _make_stream_resp(content="", tool_calls=None),
+    ]
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock, side_effect=responses), \
+         patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"status": "ok"}
+        result = await harness.run("Analyze NVDA")
+
+    assert result == "Max iterations reached without a final answer."
+    assert mock_exec.call_count == 1
+    last = session.get_messages()[-1]
+    assert not (last["role"] == "assistant" and not last.get("content"))
+
+
+@pytest.mark.asyncio
+async def test_direct_path_final_turn_stray_tool_calls_never_recorded_or_run(monkeypatch):
+    """A stray tool_calls on the forced final turn must not leak into the
+    session as an orphaned call: every recorded assistant tool_calls id needs
+    a following tool message, and the stray call must not be executed."""
+    monkeypatch.setenv("V3_USE_PRISM", "0")
+    agent = BaseAgent(
+        model="test-model", name="test_agent", system_prompt="sys", provider="vllm"
+    )
+    agent.add_tool({"name": "dummy_tool", "description": "dummy"})
+    session = ConversationSession(session_id="test_final_turn_stray_tc")
+    harness = AgentHarness(agent=agent, session=session, max_iterations=2)
+
+    responses = [
+        _make_stream_resp(tool_calls=[{"id": "c1", "name": "dummy_tool", "arguments": "{}"}]),
+        _make_stream_resp(
+            content="Final answer despite stray tool call.",
+            tool_calls=[{"id": "c2", "name": "dummy_tool", "arguments": "{}"}],
+        ),
+    ]
+    with patch("lazycat.agent.agent_client.call_agent", new_callable=AsyncMock, side_effect=responses), \
+         patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"status": "ok"}
+        result = await harness.run("Analyze NVDA")
+
+    assert result == "Final answer despite stray tool call."
+    # Only the iteration-1 call ran; the stray final-turn call was not executed.
+    assert mock_exec.call_count == 1
+
+    pending: set[str] = set()
+    for message in session.get_messages():
+        if message["role"] == "assistant":
+            pending.update(tc["id"] for tc in message.get("tool_calls", []))
+        elif message["role"] == "tool":
+            pending.discard(message["tool_call_id"])
+    assert pending == set()
+
+
+@pytest.mark.asyncio
+async def test_provider_none_offers_tools_on_every_call(monkeypatch):
+    """provider=None keeps the prism path: force_final_answer never fires,
+    so tools stay on the wire for every call up to max_iterations."""
+    monkeypatch.setenv("V3_USE_PRISM", "1")
+    agent = BaseAgent(
+        model="test-model", name="test_agent", system_prompt="sys", provider=None
+    )
+    agent.add_tool({"name": "dummy_tool", "description": "dummy"})
+    session = ConversationSession(session_id="test_provider_none_tools")
+    harness = AgentHarness(agent=agent, session=session, max_iterations=3)
+
+    recorded_calls: list[dict] = []
+
+    async def _stub_call_agent(**kwargs):
+        recorded_calls.append(
+            {"tools": kwargs.get("tools"), "messages": list(kwargs.get("messages", []))}
+        )
+        return _make_stream_resp(
+            tool_calls=[{"id": f"call_{len(recorded_calls)}", "name": "dummy_tool", "arguments": "{}"}]
+        )
+
+    with patch("lazycat.agent.agent_client.call_agent", side_effect=_stub_call_agent), \
+         patch("lazycat.agent.tool_executor.execute_tool", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"status": "ok"}
+        result = await harness.run("Analyze NVDA")
+
+    assert result == "Max iterations reached without a final answer."
+    assert len(recorded_calls) == 3
+    assert all(call["tools"] == agent.tools for call in recorded_calls)
