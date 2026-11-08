@@ -508,21 +508,46 @@ class AgentClient:
             self._client_loop = current_loop
         return self._client
 
+    @staticmethod
+    def _as_openai_completions_url(url: str) -> str:
+        base = url.rstrip("/")
+        return base if base.endswith("/v1/chat/completions") else f"{base}/v1/chat/completions"
+
+    @staticmethod
+    def _is_lazy_agent_url(url: str | None) -> bool:
+        if not url:
+            return True
+        norm = url.rstrip("/")
+        if norm.endswith((":5591", "/agent")):
+            return True
+        forbidden = {
+            (os.environ.get("LAZY_AGENT_URL") or "").rstrip("/"),
+            (getattr(config, "LAZY_AGENT_URL", "") or "").rstrip("/"),
+        }
+        try:
+            from app.config import settings
+
+            forbidden.add((getattr(settings, "LAZY_AGENT_URL", "") or "").rstrip("/"))
+        except Exception:
+            pass
+        forbidden.discard("")
+        return norm in forbidden
+
     def _resolve_direct_openai_url(self, provider: str | None) -> str:
-        if self._url:
-            base = self._url.rstrip("/")
-            return base if base.endswith("/v1/chat/completions") else f"{base}/v1/chat/completions"
         try:
             from app.services.prism_agent_caller import _resolve_endpoint_url_for_provider
 
             ep_url = _resolve_endpoint_url_for_provider(provider)
-            if ep_url:
-                base = ep_url.rstrip("/")
-                return base if base.endswith("/v1/chat/completions") else f"{base}/v1/chat/completions"
+            if ep_url and not self._is_lazy_agent_url(ep_url):
+                return self._as_openai_completions_url(ep_url)
         except Exception:
             pass
-        base = (os.environ.get("VLLM_BASE_URL") or self.url).rstrip("/")
-        return base if base.endswith("/v1/chat/completions") else f"{base}/v1/chat/completions"
+        if self._url and not self._is_lazy_agent_url(self._url):
+            return self._as_openai_completions_url(self._url)
+        env_url = os.environ.get("VLLM_BASE_URL") or ""
+        if env_url and not self._is_lazy_agent_url(env_url):
+            return self._as_openai_completions_url(env_url)
+        return ""
 
     @staticmethod
     def _build_openai_messages(messages: list[dict], system_prompt: str, agent_name: str) -> list[dict]:
@@ -634,6 +659,7 @@ class AgentClient:
             payload["tool_choice"] = "auto"
 
         if stream:
+            payload["stream_options"] = {"include_usage": True}
             if hasattr(client, "build_request") and hasattr(client, "send"):
                 req = client.build_request("POST", url, json=payload, headers=headers)
                 r = await client.send(req, stream=True)

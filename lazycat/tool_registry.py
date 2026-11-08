@@ -904,8 +904,16 @@ class ToolRegistry:
     ) -> tuple[Any, str]:
         import os
 
+        local_fn_registered = (
+            func_name in self.tools and self.tools.get(func_name) is not None
+        )
+        run_local_inprocess = (
+            local_fn_registered
+            and os.environ.get("V3_USE_PRISM", "0").strip() != "1"
+        )
         use_lazy = (
             not force_local
+            and not run_local_inprocess
             and os.getenv("USE_LAZY_AGENT_SERVICE", "false").lower() == "true"
         )
         # Bypass lazy-agent-service for save_trading_chart to execute it directly inside trading-service

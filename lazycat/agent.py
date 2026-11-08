@@ -462,6 +462,8 @@ class AgentHarness:
         if isinstance(tool_msg, dict) and "content" in tool_msg:
             raw = tool_msg["content"]
             if isinstance(raw, str):
+                if raw.startswith(("Error executing ", "Malformed tool arguments")):
+                    return {"error": raw, "is_error": True}
                 try:
                     return json.loads(raw)
                 except Exception:
@@ -495,9 +497,14 @@ class AgentHarness:
             )
             if not tool_mocked or ledger_mocked or func_name in getattr(registry, "_handlers", {}):
                 try:
-                    coro = execute_with_ledger(registry, call_payload)
+                    coro = execute_with_ledger(
+                        call_payload,
+                        _registry=registry,
+                        force_local=True,
+                        skip_permission_check=True,
+                    )
                 except TypeError:
-                    coro = execute_with_ledger(call_payload, _registry=registry)
+                    coro = execute_with_ledger(registry, call_payload)
                 tool_msg = await coro
                 return True, self._parse_ledger_tool_output(tool_msg)
         except ImportError:
