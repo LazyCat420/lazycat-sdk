@@ -26,7 +26,7 @@ from lazycat.session import ConversationSession
 
 def _harness(*responses):
     """A harness whose llm_client replays the given SSE event lists."""
-    agent = BaseAgent(model="test-model", name="t", system_prompt="sys")
+    agent = BaseAgent(model="test-model", name="t", system_prompt="sys", provider=None)
     agent.llm_client = MagicMock()
     calls = list(responses)
 

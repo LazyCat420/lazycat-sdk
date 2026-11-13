@@ -169,6 +169,7 @@ class LLMStreamWrapper:
         self._seen_model: str | None = model
         self._seen_usage: dict | None = None
         self._saw_finish_reason: bool = False
+        self._finish_reason: str | None = None
         self._pending_tool_calls: dict[int, dict] = {}
 
     def _accumulate_tool_deltas(self, deltas: list[dict]) -> None:
@@ -204,12 +205,17 @@ class LLMStreamWrapper:
         model = getattr(self, "_seen_model", None) or getattr(self, "model", None)
         provider = getattr(self, "provider", None)
         usage = getattr(self, "_seen_usage", None)
+        finish_reason = getattr(self, "_finish_reason", None)
         if model:
             done_evt["model"] = model
         if provider:
             done_evt["provider"] = provider
         if usage:
             done_evt["usage"] = usage
+        if finish_reason:
+            # Why generation stopped: without it the harness cannot tell a cut
+            # answer ("length") from a finished one.
+            done_evt["finishReason"] = finish_reason
         return f"data: {json.dumps(done_evt)}"
 
     async def _iter_openai_raw_lines(self):
@@ -250,6 +256,7 @@ class LLMStreamWrapper:
             self._accumulate_tool_deltas(delta["tool_calls"])
         if choice.get("finish_reason"):
             self._saw_finish_reason = True
+            self._finish_reason = choice["finish_reason"]
             flush = self._flush_tool_calls_event()
             if flush:
                 out.append(flush)
