@@ -126,3 +126,28 @@ async def test_reused_harness_does_not_leak_the_previous_run():
     assert h.finalize_reason is None
     assert h.provider_attempts is None
     assert h.provider_retries is None
+
+
+@pytest.mark.asyncio
+async def test_sdk_max_iterations_fallback_is_marked_synthetic(monkeypatch):
+    """The fallback string is SDK-written, so honesty says synthetic /
+    SDK_MAX_ITERATIONS; attempts/retries still report the last done event."""
+    events = [
+        {"type": "chunk", "content": "working..."},
+        {"toolCalls": [{"id": "c1", "name": "dummy_tool", "arguments": "{}"}]},
+        {"type": "done", "answerSource": "model", "finalizeReason": "COMPLETED",
+         "providerAttempts": 2, "providerRetries": 1},
+    ]
+    h = _harness(events)
+    h.max_iterations = 1
+
+    async def _fake_invoke(func_name, arguments):
+        return {"ok": True}, 5
+
+    monkeypatch.setattr(h, "_invoke_remote_tool", _fake_invoke)
+    text = await h.run("go")
+    assert text == "Max iterations reached without a final answer."
+    assert h.answer_source == "synthetic"
+    assert h.finalize_reason == "SDK_MAX_ITERATIONS"
+    # untouched by the fallback branch — they describe the last real request
+    assert (h.provider_attempts, h.provider_retries) == (2, 1)

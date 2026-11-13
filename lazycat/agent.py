@@ -728,6 +728,12 @@ class AgentHarness:
                 await self._dispatch_single_tool_call(tc)
                 
         logger.warning(f"[{self.agent.name}] Reached max iterations ({self.max_iterations})")
+        # This string is written by the SDK, not the model — report it as
+        # synthetic so a caller never books it as a real answer. The service
+        # never saw this decision, hence an SDK-specific finalize_reason.
+        # attempts/retries stay as the last done event reported them.
+        self.answer_source = "synthetic"
+        self.finalize_reason = "SDK_MAX_ITERATIONS"
         return "Max iterations reached without a final answer."
 
     async def _handle_pausing_tool(self, func_name: str, arguments: dict) -> Any:
