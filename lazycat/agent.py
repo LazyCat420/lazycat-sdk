@@ -292,6 +292,21 @@ class AgentHarness:
         # model name would misattribute.
         self.last_model: str | None = None
         self.last_provider: str | None = None
+        # Loop honesty (S-02), filled from the stream's "done" event exactly
+        # like last_model/last_provider, snake_case mirrors of the service's
+        # camelCase fields (lazy-agent-service LoopHonestyFields.ts):
+        # answer_source "model" is real model text, "synthetic" is a
+        # loop-written digest, "partial" is cut-off text; finalize_reason is
+        # e.g. "COMPLETED", "STEP_LIMIT", "CUT_OFF", "CUT_OFF_TWICE";
+        # provider_attempts/provider_retries count the provider calls of the
+        # request that produced the FINAL done event (last-wins, the same
+        # semantics as last_usage — a cross-loop total belongs to the
+        # service-side run it reports). An older service sends none of these:
+        # they stay None, never an error.
+        self.answer_source: str | None = None
+        self.finalize_reason: str | None = None
+        self.provider_attempts: int | None = None
+        self.provider_retries: int | None = None
 
     def _notify_tool_result_hook(
         self,
@@ -377,6 +392,19 @@ class AgentHarness:
             self.last_model = data["model"]
         if data.get("provider"):
             self.last_provider = data["provider"]
+        # Honesty fields ride the final done event (camelCase on the wire).
+        # Presence-gated like model/provider: an absent key leaves the
+        # previous value (None before the first done) — an older service
+        # must not raise, and a later done without the fields must not
+        # erase an earlier one's honesty.
+        if "answerSource" in data:
+            self.answer_source = data["answerSource"]
+        if "finalizeReason" in data:
+            self.finalize_reason = data["finalizeReason"]
+        if "providerAttempts" in data:
+            self.provider_attempts = data["providerAttempts"]
+        if "providerRetries" in data:
+            self.provider_retries = data["providerRetries"]
 
     async def _consume_agent_stream(
         self, resp: Any, prism_tool_started: dict[str, float]
@@ -613,6 +641,13 @@ class AgentHarness:
         # the "calling" event and consumed on "done"/"error". Per-run rather
         # than per-instance so a reused harness cannot leak stale timings.
         prism_tool_started: dict[str, float] = {}
+        # Same per-run rationale for the honesty fields: run #2 must report
+        # run #2's service, not run #1's — a service that omits the fields
+        # must read back None, not the previous run's answer_source.
+        self.answer_source = None
+        self.finalize_reason = None
+        self.provider_attempts = None
+        self.provider_retries = None
         while iterations < self.max_iterations:
             iterations += 1
             force_final_answer = (
