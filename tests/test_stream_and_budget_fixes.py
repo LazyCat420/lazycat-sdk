@@ -115,3 +115,28 @@ async def test_harness_sends_max_iterations_over_the_wire():
         await harness.run("Hello")
 
     assert mock_call.call_args.kwargs["max_iterations"] == 5
+
+
+@pytest.mark.asyncio
+async def test_done_event_carries_the_openai_finish_reason():
+    """A cut generation must be visible to the harness: finishReason="length".
+
+    Without it the direct-path harness cannot tell a truncated answer from a
+    finished one, so every seat would report an unknown finalize_reason.
+    """
+    lines = [
+        _delta_line(content="text that got cut", finish_reason="length"),
+        "data: [DONE]",
+    ]
+    wrapper = LLMStreamWrapper(_fake_openai_response(lines), is_openai=True)
+
+    done_events = []
+    async for line in wrapper.aiter_lines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        data = json.loads(line[6:])
+        if data.get("type") == "done":
+            done_events.append(data)
+
+    assert len(done_events) == 1
+    assert done_events[0]["finishReason"] == "length"

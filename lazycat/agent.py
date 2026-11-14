@@ -307,6 +307,12 @@ class AgentHarness:
         self.finalize_reason: str | None = None
         self.provider_attempts: int | None = None
         self.provider_retries: int | None = None
+        # The stream's own finish_reason ("stop"/"length"/"tool_calls"); only
+        # "length" changes the answer's honesty: the text was cut.
+        self.finish_reason: str | None = None
+        # True once a done event carried the honesty keys: the service's
+        # values are authoritative and the derivation above must not touch them.
+        self._service_honesty_seen: bool = False
 
     def _notify_tool_result_hook(
         self,
@@ -392,6 +398,8 @@ class AgentHarness:
             self.last_model = data["model"]
         if data.get("provider"):
             self.last_provider = data["provider"]
+        if "finishReason" in data:
+            self.finish_reason = data["finishReason"]
         # Honesty fields ride the final done event (camelCase on the wire).
         # Presence-gated like model/provider: an absent key leaves the
         # previous value (None before the first done) — an older service
@@ -399,6 +407,7 @@ class AgentHarness:
         # erase an earlier one's honesty.
         if "answerSource" in data:
             self.answer_source = data["answerSource"]
+            self._service_honesty_seen = True
         if "finalizeReason" in data:
             self.finalize_reason = data["finalizeReason"]
         if "providerAttempts" in data:
@@ -443,6 +452,16 @@ class AgentHarness:
                     # a successful turn (2026-10-20 cut-stream audit:
                     # 'probeprobeprobe...' returned as the answer), so
                     # stop consuming and fail the turn instead.
+                    if (
+                        _is_direct_openai_provider(self.agent.provider)
+                        and not self._service_honesty_seen
+                    ):
+                        # Name the exit before raising (mirrors
+                        # _call_provider): no answer exists, and the
+                        # attributes must not keep the previous turn's
+                        # derived model/COMPLETED on the exception path.
+                        self.answer_source = None
+                        self.finalize_reason = "PROVIDER_ERROR"
                     raise RuntimeError(
                         f"Agent stream error: {data.get('message') or 'unknown error'}"
                     )
@@ -648,8 +667,15 @@ class AgentHarness:
         self.finalize_reason = None
         self.provider_attempts = None
         self.provider_retries = None
+        self._service_honesty_seen = False
+        self.finish_reason = None
+        # The loop runs in this process on the direct path (llm.py:129/844).
+        direct = _is_direct_openai_provider(self.agent.provider)
         while iterations < self.max_iterations:
             iterations += 1
+            # finish_reason describes THIS stream only; a done event without it
+            # must not inherit the previous turn's value.
+            self.finish_reason = None
             force_final_answer = (
                 _is_direct_openai_provider(self.agent.provider)
                 and self.max_iterations > 1
@@ -670,7 +696,12 @@ class AgentHarness:
             # so without maxIterations in the payload the caller's per-role
             # turn budget never binds — prism used its own default cap.
             self.total_requests += 1
-            resp = await self.agent.llm_client.call_agent(
+            if direct and not self._service_honesty_seen:
+                # One HTTP POST per turn on the direct path (llm.py:665) and
+                # the SDK retries nothing: attempts == turns, retries == 0.
+                self.provider_attempts = iterations
+                self.provider_retries = 0
+            resp = await self._call_provider(
                 model=self.agent.model,
                 messages=call_messages,
                 system_prompt=self.agent.system_prompt,
@@ -697,12 +728,36 @@ class AgentHarness:
                 resp, prism_tool_started
             )
 
+            # The direct-openai path runs the loop HERE (llm.py:844), so no
+            # service reports who wrote the answer or why the loop stopped.
+            # A done event that carried the keys (a newer shim, or the /agent
+            # path) is authoritative: _service_honesty_seen keeps its values.
+            if direct and not self._service_honesty_seen:
+                if self.finish_reason in ("stop", "tool_calls"):
+                    self.answer_source = "model"
+                    self.finalize_reason = "COMPLETED"
+                elif self.finish_reason in ("length", "content_filter", "abort"):
+                    # A filtered or aborted reply is truncated text too; the
+                    # service contract (CoreFinalizeReason) has no reason
+                    # filter-specific, so CUT_OFF is the exact name on offer.
+                    self.answer_source = "partial"
+                    self.finalize_reason = "CUT_OFF"
+                else:
+                    # No finish reason seen (a [DONE] without one) or an
+                    # unknown value: who wrote this cannot be verified, so
+                    # unknown stays None — never a claimed "model".
+                    self.answer_source = None
+                    self.finalize_reason = None
+
             # A stream that ends without a `done` event (and without the
             # [DONE] sentinel) was cut mid-generation — e.g. gateway crash,
             # vLLM kill. The partial `content` is not an answer; returning it
             # as one is the exact defect the cut-stream boundary probe caught
             # (answer 'probeprobeprobe...' booked as a successful turn).
             if not stream_done:
+                if direct and not self._service_honesty_seen:
+                    self.answer_source = "partial"
+                    self.finalize_reason = "CUT_OFF"
                 raise RuntimeError(
                     "Agent stream ended without a done event; "
                     f"discarding {len(content)} chars of partial content"
@@ -725,16 +780,43 @@ class AgentHarness:
                 
             # 4. Dispatch tool calls
             for tc in tool_calls:
-                await self._dispatch_single_tool_call(tc)
+                try:
+                    await self._dispatch_single_tool_call(tc)
+                except Exception as exc:
+                    # A guard that aborts (agent.py:329 re-raises it) stopped the
+                    # loop on a repeated call; any other tool fault is unnamed.
+                    fn = (tc.get("function") or {}).get("name") or tc.get("name") or "unknown"
+                    self.answer_source = None
+                    self.finalize_reason = (
+                        f"repeated_tool_call:{fn}"
+                        if getattr(exc, "abort_agent_run", False)
+                        else None
+                    )
+                    raise
                 
         logger.warning(f"[{self.agent.name}] Reached max iterations ({self.max_iterations})")
         # This string is written by the SDK, not the model — report it as
         # synthetic so a caller never books it as a real answer. The service
         # never saw this decision, hence an SDK-specific finalize_reason.
-        # attempts/retries stay as the last done event reported them.
+        # attempts/retries are the SDK's own turn counts on the direct path
+        # (set per turn at agent.py:672) and the service's on the /agent path.
         self.answer_source = "synthetic"
         self.finalize_reason = "SDK_MAX_ITERATIONS"
         return "Max iterations reached without a final answer."
+
+    async def _call_provider(self, **kwargs: Any) -> Any:
+        """One provider call; a raise ends the loop on a transport fault.
+
+        The direct-openai path has no service to say why the loop stopped, so
+        name it here. No answer exists, hence answer_source stays None.
+        """
+        try:
+            return await self.agent.llm_client.call_agent(**kwargs)
+        except Exception:
+            if _is_direct_openai_provider(self.agent.provider) and not self._service_honesty_seen:
+                self.answer_source = None
+                self.finalize_reason = "PROVIDER_ERROR"
+            raise
 
     async def _handle_pausing_tool(self, func_name: str, arguments: dict) -> Any:
         import os
