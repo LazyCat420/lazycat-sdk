@@ -60,7 +60,7 @@ async def test_validator_self_review_html_strips_html_fence():
     assert result == "<div id=\"unique-comp\">Reviewed</div>"
     mock_client.call_agent.assert_awaited_once()
     _, kwargs = mock_client.call_agent.call_args
-    assert kwargs["model"] == "gpt-4o"
+    assert kwargs["model"] == ""
     assert kwargs["agent_name"] == "html_reviewer"
     assert kwargs["project"] == "my-project"
     assert kwargs["temperature"] == 0.1

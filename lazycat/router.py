@@ -43,7 +43,7 @@ Do not include any extra chat or markdown formatting outside the JSON block.
         self, 
         user_input: str, 
         conversation_history: List[Dict[str, str]] = None,
-        model: str = "gpt-4o",
+        model: str = "",
         provider: str = "vllm"
     ) -> Dict[str, Any]:
         """

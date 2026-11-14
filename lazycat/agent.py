@@ -1,12 +1,14 @@
 import hashlib
+import inspect
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Callable
 
 from lazycat.llm import _is_direct_openai_provider, agent_client
-from lazycat.tools import tool_executor
+from lazycat.tools import strip_mcp_prefix, tool_executor
 from lazycat.session import ConversationSession
 from lazycat.sse import format_sse, iter_sse_json_lines, iter_sse_lines
 
@@ -25,6 +27,23 @@ _FINAL_TURN_NUDGE = (
     "Tool budget exhausted. Do not call tools. Reply now with your final "
     "answer in the required output format using the evidence gathered so far."
 )
+
+
+def _repair_json_argument_text(text: str) -> str:
+    """Lightweight deterministic cleanup for common local-LLM JSON syntax slips.
+
+    Strips surrounding markdown ```json / ``` fences and trailing commas
+    before `}` or `]`. Never invents keys or truncates values.
+    """
+    s = text.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json|JSON)?\s*\r?\n?", "", s)
+        s = re.sub(r"\s*```$", "", s).strip()
+    prev = None
+    while prev != s:
+        prev = s
+        s = re.sub(r",\s*([}\]])", r"\1", s)
+    return s
 
 
 def decode_tool_arguments(raw: Any) -> tuple[dict, str | None]:
@@ -63,13 +82,26 @@ def decode_tool_arguments(raw: Any) -> tuple[dict, str | None]:
     try:
         decoded = json.loads(text)
     except (ValueError, TypeError) as e:
-        return {}, (
-            f"Your tool arguments were not valid JSON and could not be "
-            f"decoded ({e}). The call was NOT executed. Nothing was lost — "
-            f"re-send the SAME call with correctly escaped JSON. You sent "
-            f"{len(text)} characters starting: "
-            f"{text[:_MALFORMED_ARGS_ECHO_CHARS]!r}"
-        )
+        repaired = _repair_json_argument_text(text)
+        if repaired:
+            try:
+                decoded = json.loads(repaired)
+            except (ValueError, TypeError):
+                return {}, (
+                    f"Your tool arguments were not valid JSON and could not be "
+                    f"decoded ({e}). The call was NOT executed. Nothing was lost — "
+                    f"re-send the SAME call with correctly escaped JSON. You sent "
+                    f"{len(text)} characters starting: "
+                    f"{text[:_MALFORMED_ARGS_ECHO_CHARS]!r}"
+                )
+        else:
+            return {}, (
+                f"Your tool arguments were not valid JSON and could not be "
+                f"decoded ({e}). The call was NOT executed. Nothing was lost — "
+                f"re-send the SAME call with correctly escaped JSON. You sent "
+                f"{len(text)} characters starting: "
+                f"{text[:_MALFORMED_ARGS_ECHO_CHARS]!r}"
+            )
     if isinstance(decoded, dict):
         return decoded, None
     # A bare list/string/number parses fine but is not an argument mapping.
@@ -77,6 +109,255 @@ def decode_tool_arguments(raw: Any) -> tuple[dict, str | None]:
         f"Tool arguments must be a JSON object (e.g. {{\"ticker\": \"AAPL\"}}), "
         f"got a {type(decoded).__name__}. The call was NOT executed."
     )
+
+
+_QWEN_TOOL_CALL_RE = re.compile(
+    r"<tool_call>\s*(?:```(?:json)?\s*)?(\{.*?\})(?:\s*```)?\s*</tool_call>",
+    re.DOTALL | re.IGNORECASE,
+)
+_DSML_FUNC_CALLS_RE = re.compile(
+    r"<[｜|]DSML[｜|]function_calls\s*>(.*?)</[｜|]DSML[｜|]function_calls\s*>",
+    re.DOTALL,
+)
+_DSML_INVOKE_RE = re.compile(
+    r"<[｜|]DSML[｜|]invoke\b([^>]*)>(.*?)</[｜|]DSML[｜|]invoke\s*>",
+    re.DOTALL,
+)
+_DSML_PARAM_RE = re.compile(
+    r"<[｜|]DSML[｜|]parameter\b([^>]*)>(.*?)</[｜|]DSML[｜|]parameter\s*>",
+    re.DOTALL,
+)
+_DSML_ATTR_NAME_RE = re.compile(r'\bname\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
+_DSML_ATTR_STRING_RE = re.compile(
+    r'\bstring\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.IGNORECASE
+)
+_NUMERIC_LITERAL_RE = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def _build_allowed_tool_lookup(
+    call_tools: list[dict] | None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    allowed_exact: dict[str, str] = {}
+    allowed_bare: dict[str, str] = {}
+    for tool_def in call_tools or []:
+        if not isinstance(tool_def, dict):
+            continue
+        fn_obj = tool_def.get("function")
+        raw_name = (
+            fn_obj.get("name") if isinstance(fn_obj, dict) else None
+        ) or tool_def.get("name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            clean = raw_name.strip()
+            allowed_exact[clean] = clean
+            bare = strip_mcp_prefix(clean)
+            if bare and bare not in allowed_bare:
+                allowed_bare[bare] = clean
+    return allowed_exact, allowed_bare
+
+
+def _resolve_allowed_tool_name(
+    candidate: Any,
+    allowed_exact: dict[str, str],
+    allowed_bare: dict[str, str],
+) -> str | None:
+    if not isinstance(candidate, str) or not candidate.strip():
+        return None
+    cand = candidate.strip()
+    if cand in allowed_exact:
+        return allowed_exact[cand]
+    bare = strip_mcp_prefix(cand)
+    if bare in allowed_bare:
+        return allowed_bare[bare]
+    return None
+
+
+def _coerce_dsml_param_value(raw_val: str, string_attr: str | None) -> Any:
+    trimmed_newlines = re.sub(r"^\r?\n|\r?\n$", "", raw_val)
+    if string_attr == "true":
+        return trimmed_newlines
+    stripped = raw_val.strip()
+    if string_attr == "false":
+        if not stripped:
+            return ""
+        try:
+            return json.loads(stripped)
+        except (ValueError, TypeError):
+            repaired = _repair_json_argument_text(stripped)
+            if repaired:
+                try:
+                    return json.loads(repaired)
+                except (ValueError, TypeError):
+                    pass
+            return stripped
+    # No explicit string="true|false": coerce structured/scalar JSON literals only.
+    if (
+        stripped in ("true", "false", "null")
+        or (stripped.startswith("{") and stripped.endswith("}"))
+        or (stripped.startswith("[") and stripped.endswith("]"))
+        or bool(_NUMERIC_LITERAL_RE.match(stripped))
+    ):
+        try:
+            return json.loads(stripped)
+        except (ValueError, TypeError):
+            repaired = _repair_json_argument_text(stripped)
+            if repaired:
+                try:
+                    return json.loads(repaired)
+                except (ValueError, TypeError):
+                    pass
+    return trimmed_newlines
+
+
+def _extract_markup_tool_calls(
+    content: str,
+    call_tools: list[dict] | None,
+    iteration: int,
+) -> tuple[str, list[dict]]:
+    """Recover structured Qwen `<tool_call>` or DeepSeek DSML markup emitted as text.
+
+    Only blocks whose parsed tool name matches `call_tools` are converted and
+    stripped from `content`. Unknown tool names (e.g. prose examples) remain
+    untouched in `content` and are never executed.
+    """
+    if not call_tools or not content or not content.strip():
+        return content, []
+
+    allowed_exact, allowed_bare = _build_allowed_tool_lookup(call_tools)
+    if not allowed_exact:
+        return content, []
+
+    # Collect (start, end, list[(resolved_name, serialized_args)]) spans.
+    recovered_spans: list[tuple[int, int, list[tuple[str, str]]]] = []
+
+    for q_match in _QWEN_TOOL_CALL_RE.finditer(content):
+        raw_json = q_match.group(1)
+        parsed: Any = None
+        try:
+            parsed = json.loads(raw_json)
+        except (ValueError, TypeError):
+            repaired = _repair_json_argument_text(raw_json)
+            if repaired:
+                try:
+                    parsed = json.loads(repaired)
+                except (ValueError, TypeError):
+                    parsed = None
+        if not isinstance(parsed, dict):
+            continue
+        fn_obj = parsed.get("function") if isinstance(parsed.get("function"), dict) else None
+        cand_name = parsed.get("name") or (fn_obj.get("name") if fn_obj else None)
+        resolved_name = _resolve_allowed_tool_name(cand_name, allowed_exact, allowed_bare)
+        if not resolved_name:
+            continue
+        if "arguments" in parsed:
+            raw_args = parsed["arguments"]
+        elif "parameters" in parsed:
+            raw_args = parsed["parameters"]
+        elif "args" in parsed:
+            raw_args = parsed["args"]
+        elif fn_obj and "arguments" in fn_obj:
+            raw_args = fn_obj["arguments"]
+        else:
+            raw_args = {}
+        if isinstance(raw_args, str):
+            args_str = raw_args
+        elif raw_args is None:
+            args_str = "{}"
+        else:
+            args_str = json.dumps(raw_args, default=str)
+        recovered_spans.append((q_match.start(), q_match.end(), [(resolved_name, args_str)]))
+
+    for fc_match in _DSML_FUNC_CALLS_RE.finditer(content):
+        inner = fc_match.group(1)
+        inner_offset = fc_match.start(1)
+        matched_invokes: list[tuple[int, int, str, str]] = []
+        has_unmatched_invoke = False
+
+        for inv_match in _DSML_INVOKE_RE.finditer(inner):
+            inv_attrs = inv_match.group(1) or ""
+            inv_body = inv_match.group(2) or ""
+            name_m = _DSML_ATTR_NAME_RE.search(inv_attrs)
+            inv_name = (name_m.group(1) or name_m.group(2)) if name_m else None
+            resolved_name = _resolve_allowed_tool_name(inv_name, allowed_exact, allowed_bare)
+            if not resolved_name:
+                has_unmatched_invoke = True
+                continue
+
+            params_dict: dict[str, Any] = {}
+            for p_match in _DSML_PARAM_RE.finditer(inv_body):
+                p_attrs = p_match.group(1) or ""
+                p_val_raw = p_match.group(2) or ""
+                p_name_m = _DSML_ATTR_NAME_RE.search(p_attrs)
+                if not p_name_m:
+                    continue
+                p_name = p_name_m.group(1) or p_name_m.group(2)
+                if not p_name:
+                    continue
+                s_attr_m = _DSML_ATTR_STRING_RE.search(p_attrs)
+                s_attr = (
+                    (s_attr_m.group(1) or s_attr_m.group(2) or "").lower()
+                    if s_attr_m
+                    else None
+                )
+                params_dict[p_name] = _coerce_dsml_param_value(p_val_raw, s_attr)
+
+            matched_invokes.append(
+                (
+                    inner_offset + inv_match.start(),
+                    inner_offset + inv_match.end(),
+                    resolved_name,
+                    json.dumps(params_dict, default=str),
+                )
+            )
+
+        if not matched_invokes:
+            continue
+        if not has_unmatched_invoke:
+            recovered_spans.append(
+                (
+                    fc_match.start(),
+                    fc_match.end(),
+                    [(r_name, r_args) for _, _, r_name, r_args in matched_invokes],
+                )
+            )
+        else:
+            for s_idx, e_idx, r_name, r_args in matched_invokes:
+                recovered_spans.append((s_idx, e_idx, [(r_name, r_args)]))
+
+    if not recovered_spans:
+        return content, []
+
+    recovered_spans.sort(key=lambda item: item[0])
+    non_overlapping: list[tuple[int, int, list[tuple[str, str]]]] = []
+    last_end = 0
+    for start, end, calls in recovered_spans:
+        if start < last_end:
+            continue
+        non_overlapping.append((start, end, calls))
+        last_end = end
+
+    tool_calls: list[dict] = []
+    pieces: list[str] = []
+    cursor = 0
+    call_idx = 0
+    for start, end, calls in non_overlapping:
+        pieces.append(content[cursor:start])
+        cursor = end
+        for resolved_name, args_str in calls:
+            tool_calls.append(
+                {
+                    "id": f"call_markup_{iteration}_{call_idx}",
+                    "type": "function",
+                    "function": {
+                        "name": resolved_name,
+                        "arguments": args_str,
+                    },
+                }
+            )
+            call_idx += 1
+    pieces.append(content[cursor:])
+
+    cleaned_content = re.sub(r"\n{3,}", "\n\n", "".join(pieces)).strip()
+    return cleaned_content, tool_calls
 
 
 class ToolLoopDetector:
@@ -313,6 +594,8 @@ class AgentHarness:
         # True once a done event carried the honesty keys: the service's
         # values are authoritative and the derivation above must not touch them.
         self._service_honesty_seen: bool = False
+        self.tool_traces: list[dict[str, Any]] = []
+        self._current_tool_call_id: str | None = None
 
     def _notify_tool_result_hook(
         self,
@@ -321,11 +604,75 @@ class AgentHarness:
         result: Any,
         was_blocked: bool,
         elapsed_ms: int,
+        *,
+        tool_call_id: str = "",
+        raw_chars: int = 0,
+        model_visible_chars: int = 0,
+        was_truncated: bool = False,
     ) -> None:
         if self.on_tool_result is None:
             return
+        extra = {
+            "tool_call_id": tool_call_id,
+            "raw_chars": raw_chars,
+            "model_visible_chars": model_visible_chars,
+            "was_truncated": was_truncated,
+        }
         try:
-            self.on_tool_result(func_name, arguments, result, was_blocked, elapsed_ms)
+            call_mode = "five_pos"
+            accepted_kw: dict[str, Any] = {}
+            try:
+                sig = inspect.signature(self.on_tool_result)
+                params = list(sig.parameters.values())
+                if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+                    call_mode = "var_kw"
+                else:
+                    named_extra = {
+                        k: v for k, v in extra.items() if k in sig.parameters
+                    }
+                    if named_extra:
+                        call_mode = "named_kw"
+                        accepted_kw = named_extra
+                    else:
+                        pos_params = [
+                            p
+                            for p in params
+                            if p.kind
+                            in (
+                                inspect.Parameter.POSITIONAL_ONLY,
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            )
+                        ]
+                        has_var_pos = any(
+                            p.kind == inspect.Parameter.VAR_POSITIONAL
+                            for p in params
+                        )
+                        if len(pos_params) >= 6 or has_var_pos:
+                            call_mode = "six_pos"
+            except (TypeError, ValueError):
+                call_mode = "five_pos"
+
+            if call_mode == "var_kw":
+                self.on_tool_result(
+                    func_name, arguments, result, was_blocked, elapsed_ms, **extra
+                )
+            elif call_mode == "named_kw":
+                self.on_tool_result(
+                    func_name,
+                    arguments,
+                    result,
+                    was_blocked,
+                    elapsed_ms,
+                    **accepted_kw,
+                )
+            elif call_mode == "six_pos":
+                self.on_tool_result(
+                    func_name, arguments, result, was_blocked, elapsed_ms, extra
+                )
+            else:
+                self.on_tool_result(
+                    func_name, arguments, result, was_blocked, elapsed_ms
+                )
         except Exception as hook_err:
             # Hooks are observational and must not kill a run —
             # EXCEPT when the hook explicitly asks to abort
@@ -377,7 +724,39 @@ class AgentHarness:
             # 0 still means "not measurable" — a missing
             # `calling` event, not a 0ms call.
             elapsed_ms = int((time.time() - _t0) * 1000) if _t0 else 0
-            self._notify_tool_result_hook(func_name, arguments, result, False, elapsed_ms)
+            tc_id = str(
+                tool_payload.get("id")
+                or data.get("id")
+                or f"call_{func_name}"
+            )
+            _, raw_chars, model_visible_chars, was_truncated = (
+                self._serialize_and_truncate_tool_result(
+                    func_name, result, log_warning=False
+                )
+            )
+            self.tool_traces.append(
+                {
+                    "tool_call_id": tc_id,
+                    "tool_name": func_name,
+                    "arguments": arguments,
+                    "was_blocked": False,
+                    "elapsed_ms": elapsed_ms,
+                    "raw_chars": raw_chars,
+                    "model_visible_chars": model_visible_chars,
+                    "was_truncated": was_truncated,
+                }
+            )
+            self._notify_tool_result_hook(
+                func_name,
+                arguments,
+                result,
+                False,
+                elapsed_ms,
+                tool_call_id=tc_id,
+                raw_chars=raw_chars,
+                model_visible_chars=model_visible_chars,
+                was_truncated=was_truncated,
+            )
 
     def _record_stream_usage(self, request_usage: dict) -> None:
         if not request_usage:
@@ -527,7 +906,7 @@ class AgentHarness:
         if os.environ.get("V3_USE_PRISM", "0").strip() == "1":
             return False, None
         call_payload = {
-            "id": f"call_{func_name}",
+            "id": self._current_tool_call_id or f"call_{func_name}",
             "function": {
                 "name": func_name,
                 "arguments": (
@@ -591,23 +970,32 @@ class AgentHarness:
         )
         return result, elapsed_ms
 
-    def _format_tool_result_str(self, func_name: str, result: Any) -> str:
-        import json
-
-        result_str = json.dumps(result, default=str)
-        if len(result_str) > self.max_tool_result_chars:
-            logger.warning(
-                f"[{self.agent.name}] Truncating tool result for {func_name}: "
-                f"{len(result_str):,} chars → {self.max_tool_result_chars:,} chars"
-            )
-            result_str = result_str[: self.max_tool_result_chars] + (
-                f"\n\n[TRUNCATED: result was {len(result_str):,} chars, "
+    def _serialize_and_truncate_tool_result(
+        self, func_name: str, result: Any, *, log_warning: bool = True
+    ) -> tuple[str, int, int, bool]:
+        raw_str = json.dumps(result, default=str)
+        raw_chars = len(raw_str)
+        was_truncated = raw_chars > self.max_tool_result_chars
+        if was_truncated:
+            if log_warning:
+                logger.warning(
+                    f"[{self.agent.name}] Truncating tool result for {func_name}: "
+                    f"{raw_chars:,} chars → {self.max_tool_result_chars:,} chars"
+                )
+            result_str = raw_str[: self.max_tool_result_chars] + (
+                f"\n\n[TRUNCATED: result was {raw_chars:,} chars, "
                 f"showing first {self.max_tool_result_chars:,}]"
             )
-        return result_str
+        else:
+            result_str = raw_str
+        return result_str, raw_chars, len(result_str), was_truncated
+
+    def _format_tool_result_str(self, func_name: str, result: Any) -> str:
+        return self._serialize_and_truncate_tool_result(func_name, result)[0]
 
     async def _dispatch_single_tool_call(self, tc: dict) -> None:
         tc_id, func_name, arguments, arg_error = self._decode_tool_call_entry(tc)
+        effective_tc_id = tc_id or f"call_{func_name}"
         logger.info(f"[{self.agent.name}] Executing tool: {func_name}")
         elapsed_ms = 0
 
@@ -635,17 +1023,48 @@ class AgentHarness:
                 result = {"blocked": True, "message": override_result}
                 was_blocked = True
             else:
-                result, elapsed_ms = await self._invoke_remote_tool(func_name, arguments)
+                self._current_tool_call_id = effective_tc_id
+                try:
+                    result, elapsed_ms = await self._invoke_remote_tool(
+                        func_name, arguments
+                    )
+                finally:
+                    self._current_tool_call_id = None
                 was_blocked = False
 
-        # Notify post-call hook (e.g. ToolLoopDetector records outcome)
-        if func_name not in ("ask_user_question", "request_plan_approval"):
-            self._notify_tool_result_hook(func_name, arguments, result, was_blocked, elapsed_ms)
+        # 5. Serialize and truncate oversized payloads to prevent context overflow
+        result_str, raw_chars, model_visible_chars, was_truncated = (
+            self._serialize_and_truncate_tool_result(func_name, result)
+        )
 
-        # 5. Add result to history (truncate oversized payloads to prevent context overflow)
-        result_str = self._format_tool_result_str(func_name, result)
+        # Notify post-call hook & record per-tool lineage/truncation trace
+        if func_name not in ("ask_user_question", "request_plan_approval"):
+            self.tool_traces.append(
+                {
+                    "tool_call_id": effective_tc_id,
+                    "tool_name": func_name,
+                    "arguments": arguments,
+                    "was_blocked": was_blocked,
+                    "elapsed_ms": elapsed_ms,
+                    "raw_chars": raw_chars,
+                    "model_visible_chars": model_visible_chars,
+                    "was_truncated": was_truncated,
+                }
+            )
+            self._notify_tool_result_hook(
+                func_name,
+                arguments,
+                result,
+                was_blocked,
+                elapsed_ms,
+                tool_call_id=effective_tc_id,
+                raw_chars=raw_chars,
+                model_visible_chars=model_visible_chars,
+                was_truncated=was_truncated,
+            )
+
         self.session.add_tool_message(
-            tool_call_id=tc_id,
+            tool_call_id=effective_tc_id,
             name=func_name,
             content=result_str,
         )
@@ -669,6 +1088,7 @@ class AgentHarness:
         self.provider_retries = None
         self._service_honesty_seen = False
         self.finish_reason = None
+        self.tool_traces = []
         # The loop runs in this process on the direct path (llm.py:129/844).
         direct = _is_direct_openai_provider(self.agent.provider)
         while iterations < self.max_iterations:
@@ -735,7 +1155,11 @@ class AgentHarness:
             if direct and not self._service_honesty_seen:
                 if self.finish_reason in ("stop", "tool_calls"):
                     self.answer_source = "model"
-                    self.finalize_reason = "COMPLETED"
+                    self.finalize_reason = (
+                        "SDK_MAX_ITERATIONS_FORCED_FINAL"
+                        if force_final_answer
+                        else "COMPLETED"
+                    )
                 elif self.finish_reason in ("length", "content_filter", "abort"):
                     # A filtered or aborted reply is truncated text too; the
                     # service contract (CoreFinalizeReason) has no reason
@@ -766,10 +1190,34 @@ class AgentHarness:
             if force_final_answer:
                 # Stray tool_calls on the forced final turn are never
                 # dispatched or recorded; an empty reply is not an answer.
-                if content:
+                if content and content.strip():
                     self.session.add_assistant_message(content)
                     return content
                 break
+
+            # Recover structured Qwen <tool_call> or DeepSeek DSML markup
+            # emitted as streamed text when tools are active and no native
+            # tool_calls arrived. Only registered/allowed tools are converted.
+            if call_tools and not tool_calls and content:
+                content, recovered_calls = _extract_markup_tool_calls(
+                    content, call_tools, iterations
+                )
+                if recovered_calls:
+                    logger.info(
+                        f"[{self.agent.name}] Recovered {len(recovered_calls)} "
+                        f"markup tool call(s) on turn {iterations}"
+                    )
+                    tool_calls = recovered_calls
+
+            if tool_calls:
+                for idx, tc in enumerate(tool_calls):
+                    if isinstance(tc, dict) and not tc.get("id"):
+                        fn = (
+                            (tc.get("function") or {}).get("name")
+                            or tc.get("name")
+                            or "tool"
+                        )
+                        tc["id"] = f"call_{fn}_{iterations}_{idx}"
 
             # 2. Add LLM response to history
             self.session.add_assistant_message(content, tool_calls)

@@ -126,12 +126,12 @@ async def test_stream_without_done_event_is_partial_cut_off():
 
 
 @pytest.mark.asyncio
-async def test_forced_final_turn_answer_is_model_completed():
+async def test_forced_final_turn_answer_is_model_forced_final():
     h = _harness(_tool_turn(), _text_turn("final", finishReason="stop"), max_iterations=2)
     _tool_results(h, {"ok": True})
     text = await h.run("go")
     assert text == "final"
-    assert (h.answer_source, h.finalize_reason) == ("model", "COMPLETED")
+    assert (h.answer_source, h.finalize_reason) == ("model", "SDK_MAX_ITERATIONS_FORCED_FINAL")
     assert h.provider_attempts == 2
 
 
