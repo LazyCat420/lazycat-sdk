@@ -59,7 +59,7 @@ def _text_turn(text, **done_extra):
     return [{"type": "chunk", "content": text}, _done(**done_extra)]
 
 
-def _tool_turn(name="dummy_tool", args='{"q": "1"}'):
+def _tool_turn(name="dummy_tool", args='{"q": "1"}', **done_extra):
     return [
         {
             "type": "tool_calls",
@@ -71,7 +71,7 @@ def _tool_turn(name="dummy_tool", args='{"q": "1"}'):
                 }
             ],
         },
-        _done(),
+        _done(**done_extra),
     ]
 
 
@@ -225,3 +225,62 @@ async def test_service_values_win_over_the_derivation():
         9,
         3,
     )
+
+
+@pytest.mark.asyncio
+async def test_stale_length_on_earlier_turn_does_not_leak():
+    """A tool turn that ended at "length" must not brand the next answer."""
+    h = _harness(
+        _tool_turn(finishReason="length"),
+        _text_turn("final", finishReason="stop"),
+    )
+    _tool_results(h, {"ok": True})
+    text = await h.run("go")
+    assert text == "final"
+    assert (h.answer_source, h.finalize_reason) == ("model", "COMPLETED")
+
+
+@pytest.mark.asyncio
+async def test_filtered_or_aborted_reply_is_partial():
+    """content_filter/abort are truncated text too: partial, never "model"."""
+    for reason in ("content_filter", "abort"):
+        h = _harness(_text_turn("truncated text", finishReason=reason))
+        text = await h.run("go")
+        assert text == "truncated text"
+        assert (h.answer_source, h.finalize_reason) == ("partial", "CUT_OFF"), reason
+
+
+@pytest.mark.asyncio
+async def test_missing_finish_reason_stays_unknown():
+    """A done event without any finishReason cannot prove who wrote the text."""
+    h = _harness(_text_turn("the answer"))  # the shim's done, no finishReason
+    text = await h.run("go")
+    assert text == "the answer"
+    assert (h.answer_source, h.finalize_reason) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_error_after_tool_turn_names_provider_error():
+    """The error event must not leave turn 1's model/COMPLETED on the object."""
+    h = _harness(
+        _tool_turn(finishReason="tool_calls"),
+        [
+            {"type": "chunk", "content": "half a thought"},
+            {"type": "error", "message": "model died mid-stream"},
+        ],
+    )
+    _tool_results(h, {"ok": True})
+    with pytest.raises(RuntimeError):
+        await h.run("go")
+    assert (h.answer_source, h.finalize_reason) == (None, "PROVIDER_ERROR")
+
+
+@pytest.mark.asyncio
+async def test_reused_harness_second_run_starts_clean():
+    """Run #2 reports run #2: run #1's model/COMPLETED must not survive."""
+    h = _harness(_text_turn("one", finishReason="stop"), _text_turn("two"))
+    text1 = await h.run("go")
+    assert (text1, h.answer_source, h.finalize_reason) == ("one", "model", "COMPLETED")
+    text2 = await h.run("go")
+    assert text2 == "two"
+    assert (h.answer_source, h.finalize_reason) == (None, None)

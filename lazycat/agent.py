@@ -452,6 +452,16 @@ class AgentHarness:
                     # a successful turn (2026-10-20 cut-stream audit:
                     # 'probeprobeprobe...' returned as the answer), so
                     # stop consuming and fail the turn instead.
+                    if (
+                        _is_direct_openai_provider(self.agent.provider)
+                        and not self._service_honesty_seen
+                    ):
+                        # Name the exit before raising (mirrors
+                        # _call_provider): no answer exists, and the
+                        # attributes must not keep the previous turn's
+                        # derived model/COMPLETED on the exception path.
+                        self.answer_source = None
+                        self.finalize_reason = "PROVIDER_ERROR"
                     raise RuntimeError(
                         f"Agent stream error: {data.get('message') or 'unknown error'}"
                     )
@@ -723,12 +733,21 @@ class AgentHarness:
             # A done event that carried the keys (a newer shim, or the /agent
             # path) is authoritative: _service_honesty_seen keeps its values.
             if direct and not self._service_honesty_seen:
-                if self.finish_reason == "length":
+                if self.finish_reason in ("stop", "tool_calls"):
+                    self.answer_source = "model"
+                    self.finalize_reason = "COMPLETED"
+                elif self.finish_reason in ("length", "content_filter", "abort"):
+                    # A filtered or aborted reply is truncated text too; the
+                    # service contract (CoreFinalizeReason) has no reason
+                    # filter-specific, so CUT_OFF is the exact name on offer.
                     self.answer_source = "partial"
                     self.finalize_reason = "CUT_OFF"
                 else:
-                    self.answer_source = "model"
-                    self.finalize_reason = "COMPLETED"
+                    # No finish reason seen (a [DONE] without one) or an
+                    # unknown value: who wrote this cannot be verified, so
+                    # unknown stays None — never a claimed "model".
+                    self.answer_source = None
+                    self.finalize_reason = None
 
             # A stream that ends without a `done` event (and without the
             # [DONE] sentinel) was cut mid-generation — e.g. gateway crash,
