@@ -44,6 +44,7 @@ DEFAULT_COLLECTOR_URL = "http://10.0.0.16:5595/v1/telemetry"
 
 _queue: collections.deque = collections.deque(maxlen=2000)
 _lock = threading.Lock()
+_send_lock = threading.Lock()
 _thread: threading.Thread | None = None
 _thread_started = threading.Event()
 
@@ -87,19 +88,20 @@ def _post_batch(spans: list[dict[str, Any]]) -> None:
 
 def _worker_loop() -> None:
     while True:
-        batch: list[dict[str, Any]] = []
-        with _lock:
-            while _queue and len(batch) < 50:
-                batch.append(_queue.popleft())
-        if not batch:
-            # Nothing to send; wait before re-checking.
-            if threading.Event().wait(1.0):
-                return
-            continue
-        try:
-            _post_batch(batch)
-        except Exception as e:  # noqa: BLE001 — telemetry must never surface
-            logger.debug("[tool_telemetry] export failed: %s", e)
+        with _send_lock:
+            batch: list[dict[str, Any]] = []
+            with _lock:
+                while _queue and len(batch) < 50:
+                    batch.append(_queue.popleft())
+            if batch:
+                try:
+                    _post_batch(batch)
+                except Exception as e:  # noqa: BLE001 — telemetry must never surface
+                    logger.debug("[tool_telemetry] export failed: %s", e)
+                continue
+        # Nothing to send; wait before re-checking (outside _send_lock so flush() is never blocked).
+        if threading.Event().wait(1.0):
+            return
 
 
 def _ensure_worker() -> None:
@@ -180,9 +182,10 @@ def emit_tool_execution_span(
 
 def flush() -> None:
     """Drain the queue synchronously (tests, shutdown)."""
-    batch: list[dict[str, Any]] = []
-    with _lock:
-        while _queue:
-            batch.append(_queue.popleft())
-    if batch:
-        _post_batch(batch)
+    with _send_lock:
+        batch: list[dict[str, Any]] = []
+        with _lock:
+            while _queue:
+                batch.append(_queue.popleft())
+        if batch:
+            _post_batch(batch)
