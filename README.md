@@ -45,6 +45,10 @@ direct OpenAI-compatible streaming** over lazy-agent-service's
 
 `LAZY_AGENT_SERVICE_URL` defaults to `http://10.0.0.16:5591`.
 
+## Tool telemetry pytest guard (2026-11-15)
+
+`lazycat.tool_telemetry` suppresses queueing and HTTP export to the default NAS collector (`http://10.0.0.16:5595/v1/telemetry`) whenever running under `pytest` (`PYTEST_CURRENT_TEST` or `pytest` in `sys.modules`) unless `TELEMETRY_COLLECTOR_URL` is explicitly set in the environment. This prevents unit test tool calls (`test_dummy_tool`, mock errors) from creating synthetic incidents on the live collector.
+
 It used to call the `ddgs` library for news and web results. `ddgs` scrapes DuckDuckGo, and on a blocked IP tries about nine engines for every call. The free search engines bot-block this network's one public IP (lazy-agent-service `documentation/chapters/04-shared-web-search.md`), so every one of those calls made the block worse for every project. `ddgs` is no longer a dependency.
 
 A search that is refused (`rate_limited`, `busy`) or cannot be reached contributes no articles; it never raises. `tests/test_grounded_research_sources.py` covers:

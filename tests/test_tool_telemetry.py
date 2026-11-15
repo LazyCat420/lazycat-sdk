@@ -143,3 +143,32 @@ async def test_telemetry_outage_does_not_raise_or_delay_the_tool(monkeypatch):
         tool_telemetry.flush()  # the POST itself fails — but nothing above did
     with tool_telemetry._lock:
         tool_telemetry._queue.clear()
+
+
+@pytest.mark.asyncio
+async def test_pytest_without_collector_env_does_not_post_to_default_nas(monkeypatch):
+    monkeypatch.delenv("TELEMETRY_COLLECTOR_URL", raising=False)
+    with tool_telemetry._lock:
+        tool_telemetry._queue.clear()
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("tool_telemetry posted to default NAS collector during pytest")
+
+    monkeypatch.setattr(tool_telemetry.urllib.request, "urlopen", fail_if_called)
+
+    registry = ToolRegistry()
+
+    @registry.register(name="test_dummy_tool")
+    async def test_dummy_tool() -> dict:
+        return {"ok": True}
+
+    res = await registry.execute_tool_call(
+        tool_call={"id": "call_4", "type": "function", "function": {"name": "test_dummy_tool", "arguments": "{}"}},
+        agent_name="analyst",
+        ticker="NVDA",
+        cycle_id="cycle-test",
+    )
+    assert res["role"] == "tool"
+    tool_telemetry.flush()
+    with tool_telemetry._lock:
+        assert len(tool_telemetry._queue) == 0

@@ -31,6 +31,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import threading
 import uuid
 import urllib.request
@@ -47,6 +48,13 @@ _thread: threading.Thread | None = None
 _thread_started = threading.Event()
 
 
+def _is_unconfigured_pytest() -> bool:
+    """Suppress default NAS telemetry emission during pytest unless explicitly configured."""
+    return "TELEMETRY_COLLECTOR_URL" not in os.environ and (
+        "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+    )
+
+
 def _collector_url() -> str:
     return os.environ.get(
         "TELEMETRY_COLLECTOR_URL", DEFAULT_COLLECTOR_URL
@@ -58,6 +66,8 @@ def _service_source() -> str:
 
 
 def _post_batch(spans: list[dict[str, Any]]) -> None:
+    if _is_unconfigured_pytest():
+        return
     payload = {
         "schema_version": "1.0",
         "service_source": _service_source(),
@@ -154,6 +164,8 @@ def emit_tool_execution_span(
     cycle_id: str | None = None,
 ) -> None:
     """Queue one `tool_execution` span. Never raises, never blocks."""
+    if _is_unconfigured_pytest():
+        return
     try:
         span = build_tool_execution_span(
             tool, agent, success=success, duration_ms=duration_ms,
