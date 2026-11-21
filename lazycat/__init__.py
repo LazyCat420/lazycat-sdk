@@ -1,73 +1,15 @@
-from .llm import agent_client, AgentClient, LLMStreamWrapper, LLMResponseWrapper
-from .research import research
-from .grounded_research import grounded_research
-from .llm_json import (
-    extract_json_str,
-    parse_json_list_response,
-    parse_json_response,
-    parse_json_strict,
-    strip_think_tags,
-)
-from .models import (
-    CreateRunRequest,
-    DecisionReceipt,
-    DecisionConstraints,
-    DecisionQuestion,
-    DecisionEvidence,
-    TypedDecisionRequest,
-    TypedDecisionResult,
-    RunBudget,
-    RunEvent,
-    RunEventType,
-    RunProfile,
-    RunResult,
-    RunUsage,
-    StructuredError,
-)
-from .client import (
-    RuntimeClient,
-    RuntimeClientError,
-    RunNotFoundError,
-    RunTimeoutError,
-    RunEventDecodeError,
-)
+"""Retired shared SDK tombstone.
 
-# The cross-cutting utilities (cache, ratelimit, resilience, sse) stay behind
-# explicit submodule imports — e.g. `from lazycat.resilience import ...` — so
-# importing the package stays cheap and the top-level surface stays readable.
+`platform/lazycat-sdk` was retired on 2026-11-21 when every LazyCat420 Python
+service internalized its runtime client and shared utilities directly:
 
-# Keep in sync with pyproject.toml [project] version
-__version__ = "0.4.1"
+- `finance/trading/trading-service`: `app/lib/*` (`las_client.py`, `llm_json.py`, ...)
+- `finance/trading/trading-client`: `app/lib/las_client.py`
+- `apps/html-notes`: `app/lib/*` (`las_client.py`, `llm_json.py`, ...)
+- `apps/media/music-player`: `apps/api/app/agent/las_client.py`
+- `agents/scraper-service`: stages `app/lib/llm_json.py` from `trading-service`
+"""
 
-__all__ = [
-    "agent_client",
-    "AgentClient",
-    "LLMStreamWrapper",
-    "LLMResponseWrapper",
-    "research",
-    "grounded_research",
-    "parse_json_response",
-    "parse_json_list_response",
-    "parse_json_strict",
-    "extract_json_str",
-    "strip_think_tags",
-    "RuntimeClient",
-    "RuntimeClientError",
-    "RunNotFoundError",
-    "RunTimeoutError",
-    "RunEventDecodeError",
-    "CreateRunRequest",
-    "DecisionReceipt",
-    "DecisionConstraints",
-    "DecisionQuestion",
-    "DecisionEvidence",
-    "TypedDecisionRequest",
-    "TypedDecisionResult",
-    "RunBudget",
-    "RunEvent",
-    "RunEventType",
-    "RunProfile",
-    "RunResult",
-    "RunUsage",
-    "StructuredError",
-]
+raise ImportError(
+    "lazycat-sdk was retired on 2026-11-21; use each repo's internalized app/lib/* client instead."
+)
