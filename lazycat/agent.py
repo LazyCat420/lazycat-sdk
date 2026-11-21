@@ -438,6 +438,122 @@ class ToolLoopDetector:
 
         return None
 
+class _RunawayStreamDetector:
+    """Detect degenerate repetition in streamed assistant text."""
+
+    def __init__(
+        self,
+        *,
+        char_run_limit: int = 256,
+        min_block_len: int = 80,
+        min_block_repeats: int = 4,
+        min_phrase_len: int = 20,
+        phrase_repeats: int = 10,
+        min_eval_chars: int = 1024,
+        min_unique_ratio: float = 0.20,
+    ):
+        self.char_run_limit = char_run_limit
+        self.min_block_len = min_block_len
+        self.min_block_repeats = min_block_repeats
+        self.min_phrase_len = min_phrase_len
+        self.phrase_repeats = phrase_repeats
+        self.min_eval_chars = min_eval_chars
+        self.min_unique_ratio = min_unique_ratio
+        self._buf = ""
+        self._last_char = ""
+        self._char_run = 0
+        self._last_eval_len = 0
+        self.tripped = False
+        self.reason: str | None = None
+        self.clean_prefix = ""
+
+    def feed(self, chunk: str) -> bool:
+        if not chunk or self.tripped:
+            return self.tripped
+
+        start_offset = len(self._buf)
+        for idx, ch in enumerate(chunk):
+            if ch == self._last_char:
+                self._char_run += 1
+                if self._char_run >= self.char_run_limit:
+                    self.tripped = True
+                    self.reason = f"char_run:{ch!r}x{self._char_run}"
+                    cut = max(0, start_offset + idx + 1 - self._char_run)
+                    self.clean_prefix = (self._buf + chunk)[:cut]
+                    self._buf += chunk
+                    return True
+            else:
+                self._last_char = ch
+                self._char_run = 1
+
+        self._buf += chunk
+        n = len(self._buf)
+        if n - self._last_eval_len < 64 and n < self.min_block_len * self.min_block_repeats:
+            return False
+        self._last_eval_len = n
+
+        # 1. >= 4 consecutive identical blocks of >= 80 chars at the tail
+        max_block = min(400, n // self.min_block_repeats)
+        if max_block >= self.min_block_len:
+            tail = self._buf[-(max_block * self.min_block_repeats) :]
+            tlen = len(tail)
+            for blen in range(self.min_block_len, max_block + 1):
+                if tail[-1] != tail[-1 - blen]:
+                    continue
+                if tail[-8:] != tail[-8 - blen : -blen]:
+                    continue
+                block = tail[tlen - blen :]
+                if not block.strip():
+                    continue
+                if all(
+                    tail[tlen - blen * k : tlen - blen * (k - 1)] == block
+                    for k in range(2, self.min_block_repeats + 1)
+                ):
+                    self.tripped = True
+                    self.reason = f"repeated_block:len={blen},repeats={self.min_block_repeats}"
+                    cut = n - blen * (self.min_block_repeats - 1)
+                    self.clean_prefix = self._buf[: max(0, cut)]
+                    return True
+
+        # 2. Short phrase (20..79 chars) repeated >= 10x at the tail
+        max_phrase = min(self.min_block_len - 1, n // self.phrase_repeats)
+        if max_phrase >= self.min_phrase_len:
+            tail = self._buf[-(max_phrase * self.phrase_repeats) :]
+            tlen = len(tail)
+            for plen in range(self.min_phrase_len, max_phrase + 1):
+                if tail[-4:] != tail[-4 - plen : -plen]:
+                    continue
+                phrase = tail[tlen - plen :]
+                if not phrase.strip():
+                    continue
+                if all(
+                    tail[tlen - plen * k : tlen - plen * (k - 1)] == phrase
+                    for k in range(2, self.phrase_repeats + 1)
+                ):
+                    self.tripped = True
+                    self.reason = f"repeated_phrase:len={plen},repeats={self.phrase_repeats}"
+                    cut = n - plen * (self.phrase_repeats - 1)
+                    self.clean_prefix = self._buf[: max(0, cut)]
+                    return True
+
+        # 3. Sliding-window diversity collapse
+        if n >= self.min_eval_chars:
+            sample = self._buf[-4096:]
+            wlen = 32
+            step = 8
+            windows = [
+                sample[i : i + wlen]
+                for i in range(0, len(sample) - wlen + 1, step)
+            ]
+            if windows and (len(set(windows)) / len(windows)) < self.min_unique_ratio:
+                self.tripped = True
+                self.reason = "diversity_collapse"
+                self.clean_prefix = self._buf[: max(0, n - len(sample))]
+                return True
+
+        return False
+
+
 class BaseAgent:
     """Base class for all LazyCat SDK agents.
 
@@ -528,6 +644,7 @@ class AgentHarness:
         max_tool_result_chars: int = 50_000,
         thinking_enabled: bool | None = None,
         bench_task: str | None = None,
+        max_tool_calls: int | None = 32,
     ):
         import warnings
         warnings.warn(
@@ -539,6 +656,7 @@ class AgentHarness:
         self.agent = agent
         self.session = session
         self.max_iterations = max_iterations
+        self.max_tool_calls = max_tool_calls
         # None = provider/gateway default; False suppresses <think> blocks on
         # models that support toggling (prism honors an explicit false).
         self.thinking_enabled = thinking_enabled
@@ -550,6 +668,10 @@ class AgentHarness:
         self.on_tool_result = on_tool_result
         self.max_tool_result_chars = max_tool_result_chars
         self.loop_detector = ToolLoopDetector(max_identical_failures=3)
+        self.stop_cause: str = "completed"
+        self._total_tool_calls: int = 0
+        self._thrash_counts: dict[str, int] = {}
+        self._force_finalize_next: bool = False
         # Token accounting, filled from the stream's cumulative usage_update
         # events: last_usage is the final snapshot of the most recent request;
         # total_tokens sums input+output(+reasoning) across all loop iterations.
@@ -801,11 +923,26 @@ class AgentHarness:
         tool_calls: list = []
         request_usage: dict = {}
         stream_done = False
+        runaway_watch = _RunawayStreamDetector()
         try:
             async for data in iter_sse_json_lines(resp.aiter_lines(), done_sentinel="[DONE]"):
                 event_type = data.get("type")
                 if event_type == "chunk":
                     chunk_text = data.get("content", "")
+                    if runaway_watch.feed(chunk_text):
+                        logger.warning(
+                            "[%s] Runaway stream repetition detected (%s) — truncating stream",
+                            self.agent.name,
+                            runaway_watch.reason,
+                        )
+                        content = runaway_watch.clean_prefix
+                        tool_calls = []
+                        stream_done = True
+                        self.stop_cause = "runaway_stream"
+                        self.answer_source = "partial"
+                        self.finalize_reason = "RUNAWAY_STREAM"
+                        self._service_honesty_seen = True
+                        break
                     content += chunk_text
                     # Opt-in only: echoing every token to stdout from
                     # concurrent agents interleaves raw model text
@@ -993,6 +1130,51 @@ class AgentHarness:
     def _format_tool_result_str(self, func_name: str, result: Any) -> str:
         return self._serialize_and_truncate_tool_result(func_name, result)[0]
 
+    @staticmethod
+    def _canonical_thrash_key(func_name: str, arguments: Any) -> str:
+        args_str = json.dumps(arguments, sort_keys=True, default=str) if arguments else ""
+        args_hash = hashlib.sha256(args_str.encode()).hexdigest()[:16]
+        return f"{func_name}:{args_hash}"
+
+    def _check_thrash_or_budget(self, func_name: str, arguments: Any) -> dict[str, Any] | None:
+        if self.max_tool_calls is not None and self._total_tool_calls >= self.max_tool_calls:
+            self.stop_cause = "tool_thrash"
+            self._force_finalize_next = True
+            logger.warning(
+                "[%s] max_tool_calls (%d) reached before %s — short-circuiting to final answer",
+                self.agent.name,
+                self.max_tool_calls,
+                func_name,
+            )
+            return {
+                "error": (
+                    f"[TOOL_BUDGET_GUARD] Tool call limit ({self.max_tool_calls}) reached. "
+                    "Do NOT call any more tools. Finalize immediately using the evidence already gathered."
+                ),
+                "is_error": True,
+                "blocked": True,
+            }
+        key = self._canonical_thrash_key(func_name, arguments)
+        ok_count = self._thrash_counts.get(key, 0)
+        if ok_count >= 2:
+            self.stop_cause = "tool_thrash"
+            self._force_finalize_next = True
+            logger.warning(
+                "[%s] Tool thrash detected: %s called %d+ times with identical args — forcing finalization",
+                self.agent.name,
+                func_name,
+                ok_count + 1,
+            )
+            return {
+                "error": (
+                    f"[TOOL_THRASH_GUARD] '{func_name}' already succeeded {ok_count} times with identical "
+                    "arguments. Stop calling this tool and immediately produce your final answer from gathered evidence."
+                ),
+                "is_error": True,
+                "blocked": True,
+            }
+        return None
+
     async def _dispatch_single_tool_call(self, tc: dict) -> None:
         tc_id, func_name, arguments, arg_error = self._decode_tool_call_entry(tc)
         effective_tc_id = tc_id or f"call_{func_name}"
@@ -1016,21 +1198,30 @@ class AgentHarness:
             result = await self._handle_pausing_tool(func_name, arguments)
             was_blocked = False
         else:
-            override_result = self._check_tool_override(func_name, arguments)
-            if override_result is not None:
-                # Hook blocked this call — use override as result
-                logger.warning(f"[{self.agent.name}] Tool call blocked: {func_name}")
-                result = {"blocked": True, "message": override_result}
+            thrash_err = self._check_thrash_or_budget(func_name, arguments)
+            if thrash_err is not None:
+                result = thrash_err
                 was_blocked = True
             else:
-                self._current_tool_call_id = effective_tc_id
-                try:
-                    result, elapsed_ms = await self._invoke_remote_tool(
-                        func_name, arguments
-                    )
-                finally:
-                    self._current_tool_call_id = None
-                was_blocked = False
+                override_result = self._check_tool_override(func_name, arguments)
+                if override_result is not None:
+                    # Hook blocked this call — use override as result
+                    logger.warning(f"[{self.agent.name}] Tool call blocked: {func_name}")
+                    result = {"blocked": True, "message": override_result}
+                    was_blocked = True
+                else:
+                    self._total_tool_calls += 1
+                    self._current_tool_call_id = effective_tc_id
+                    try:
+                        result, elapsed_ms = await self._invoke_remote_tool(
+                            func_name, arguments
+                        )
+                    finally:
+                        self._current_tool_call_id = None
+                    was_blocked = False
+                    if not self._is_tool_result_failed(result):
+                        tkey = self._canonical_thrash_key(func_name, arguments)
+                        self._thrash_counts[tkey] = self._thrash_counts.get(tkey, 0) + 1
 
         # 5. Serialize and truncate oversized payloads to prevent context overflow
         result_str, raw_chars, model_visible_chars, was_truncated = (
@@ -1089,6 +1280,10 @@ class AgentHarness:
         self._service_honesty_seen = False
         self.finish_reason = None
         self.tool_traces = []
+        self.stop_cause = "completed"
+        self._total_tool_calls = 0
+        self._thrash_counts = {}
+        self._force_finalize_next = False
         # The loop runs in this process on the direct path (llm.py:129/844).
         direct = _is_direct_openai_provider(self.agent.provider)
         while iterations < self.max_iterations:
@@ -1097,9 +1292,8 @@ class AgentHarness:
             # must not inherit the previous turn's value.
             self.finish_reason = None
             force_final_answer = (
-                _is_direct_openai_provider(self.agent.provider)
-                and self.max_iterations > 1
-                and iterations == self.max_iterations
+                (_is_direct_openai_provider(self.agent.provider) and self.max_iterations > 1 and iterations == self.max_iterations)
+                or self._force_finalize_next
             )
             call_messages = list(self.session.get_messages())
             if force_final_answer:
@@ -1250,6 +1444,8 @@ class AgentHarness:
         # (set per turn at agent.py:672) and the service's on the /agent path.
         self.answer_source = "synthetic"
         self.finalize_reason = "SDK_MAX_ITERATIONS"
+        if self.stop_cause == "completed":
+            self.stop_cause = "step_limit"
         return "Max iterations reached without a final answer."
 
     async def _call_provider(self, **kwargs: Any) -> Any:
